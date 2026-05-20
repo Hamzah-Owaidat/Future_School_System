@@ -68,21 +68,13 @@ cd backend
 npm install
 ```
 
-Create `backend/.env` (adjust values):
+Copy the example env file and edit your values:
 
-```env
-PORT=8080
-NODE_ENV=development
-
-DB_HOST=localhost
-DB_PORT=3306
-DB_NAME=futurschool
-DB_USER=root
-DB_PASSWORD=your_mysql_password
-
-JWT_SECRET=change-this-to-a-long-random-string
-JWT_EXPIRE=7d
+```bash
+cp .env.example .env
 ```
+
+See [backend/.env.example](backend/.env.example) for every variable and its description.
 
 Apply schema and seed demo data:
 
@@ -106,11 +98,13 @@ cd frontend
 npm install
 ```
 
-Create `frontend/.env.local`:
+Copy the example env file and set the API URL (must match backend `PORT`):
 
-```env
-NEXT_PUBLIC_API_BASE_URL=http://localhost:8080/api/
+```bash
+cp .env.local.example .env.local
 ```
+
+See [frontend/.env.local.example](frontend/.env.local.example) for details.
 
 Start the UI:
 
@@ -230,6 +224,13 @@ Core tables: `users`, `employees`, `students`, `roles`, `permissions`, `role_per
 - Do not run `db:refresh` or `migrate:fresh` on production data
 
 ---
+
+## Environment files
+
+| File | Copy to | Purpose |
+|------|---------|---------|
+| [backend/.env.example](backend/.env.example) | `backend/.env` | Server, MySQL, JWT |
+| [frontend/.env.local.example](frontend/.env.local.example) | `frontend/.env.local` | API base URL |
 
 ## Further documentation
 
