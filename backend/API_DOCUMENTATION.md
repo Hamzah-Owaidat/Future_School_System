@@ -143,6 +143,12 @@ GET /api/students?page=1&limit=10&search=john&class_id=1&is_active=true&show_all
 GET /api/students/:id
 ```
 
+### Next Student Code (preview)
+```http
+GET /api/students/next-code
+```
+Returns the next auto-generated code (`STU000`, `STU001`, …).
+
 ### Create Student
 ```http
 POST /api/students
@@ -158,6 +164,9 @@ POST /api/students
   "parent_phone": "123-456-7890"
 }
 ```
+*`student_code` is optional — omit it to auto-assign the next code (starts at `STU000`). Codes cannot be changed after create.*
+
+*`email` alone is stored as contact info. Send `password` with `email` only when creating a portal login (My Grades).*
 
 ### Update Student
 ```http

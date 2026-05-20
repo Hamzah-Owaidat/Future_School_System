@@ -35,7 +35,8 @@ async function runSeed() {
     const [results] = await connection.query(sql);
     
     console.log('✅ Seed data executed successfully!');
-    console.log('💡 Next step: Run "node scripts/setup-passwords.js" to set admin password\n');
+    console.log('💡 Default admin password from seed is `password1234` — rotate it after first login.');
+    console.log('   Use `node scripts/setup-passwords.js` to reset empty employee login passwords.\n');
   } catch (error) {
     console.error('❌ Error running seed data:', error.message);
     if (error.sql) {

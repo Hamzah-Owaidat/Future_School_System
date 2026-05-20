@@ -1,4 +1,4 @@
-const { query } = require('../config/database');
+const { query, pool } = require('../config/database');
 const bcrypt = require('bcryptjs');
 const { asyncHandler, sendSuccessResponse, sendErrorResponse } = require('../utils/helpers');
 
@@ -18,8 +18,9 @@ exports.getAllEmployees = asyncHandler(async (req, res, next) => {
   let sql = `
     SELECT e.*, r.name as role_name, r.description as role_description
     FROM employees e
+    INNER JOIN users u ON e.user_id = u.id
     INNER JOIN roles r ON e.role_id = r.id
-    WHERE 1=1
+    WHERE 1=1 AND r.deleted_at IS NULL
   `;
   const params = [];
 
@@ -36,8 +37,11 @@ exports.getAllEmployees = asyncHandler(async (req, res, next) => {
   }
 
   if (role_id) {
-    sql += ` AND e.role_id = ?`;
-    params.push(parseInt(role_id));
+    sql += ` AND (e.role_id = ? OR EXISTS (
+      SELECT 1 FROM user_roles ur WHERE ur.user_id = e.user_id AND ur.role_id = ?
+    ))`;
+    const rid = parseInt(role_id, 10);
+    params.push(rid, rid);
   }
 
   if (is_active !== '') {
@@ -54,7 +58,8 @@ exports.getAllEmployees = asyncHandler(async (req, res, next) => {
   let countSql = `
     SELECT COUNT(*) as total
     FROM employees e
-    WHERE 1=1
+    INNER JOIN roles r ON e.role_id = r.id
+    WHERE 1=1 AND r.deleted_at IS NULL
   `;
   const countParams = [];
 
@@ -70,8 +75,11 @@ exports.getAllEmployees = asyncHandler(async (req, res, next) => {
   }
 
   if (role_id) {
-    countSql += ` AND e.role_id = ?`;
-    countParams.push(parseInt(role_id));
+    countSql += ` AND (e.role_id = ? OR EXISTS (
+      SELECT 1 FROM user_roles ur WHERE ur.user_id = e.user_id AND ur.role_id = ?
+    ))`;
+    const rid = parseInt(role_id, 10);
+    countParams.push(rid, rid);
   }
 
   if (is_active !== '') {
@@ -81,9 +89,6 @@ exports.getAllEmployees = asyncHandler(async (req, res, next) => {
 
   const countResult = await query(countSql, countParams);
   const total = countResult[0].total;
-
-  // Remove passwords from response
-  employees.forEach(emp => delete emp.password);
 
   sendSuccessResponse(res, 200, {
     employees,
@@ -107,8 +112,9 @@ exports.getEmployeeById = asyncHandler(async (req, res, next) => {
   const employees = await query(
     `SELECT e.*, r.name as role_name, r.description as role_description
      FROM employees e
+     INNER JOIN users u ON e.user_id = u.id
      INNER JOIN roles r ON e.role_id = r.id
-     WHERE e.id = ?`,
+     WHERE e.id = ? AND e.deleted_at IS NULL AND r.deleted_at IS NULL`,
     [id]
   );
 
@@ -117,7 +123,6 @@ exports.getEmployeeById = asyncHandler(async (req, res, next) => {
   }
 
   const employee = employees[0];
-  delete employee.password;
 
   sendSuccessResponse(res, 200, { employee }, 'Employee retrieved successfully');
 });
@@ -204,70 +209,91 @@ exports.createEmployee = asyncHandler(async (req, res, next) => {
     role_id
   } = req.body;
 
-  // Validate required fields (employee_code is now optional)
   if (!first_name || !last_name || !email || !hire_date || !role_id) {
     return sendErrorResponse(res, 400, 'Please provide all required fields');
   }
 
-  // Generate employee code if not provided
   let finalEmployeeCode = employee_code;
   if (!finalEmployeeCode) {
     finalEmployeeCode = await generateEmployeeCode();
   }
 
-  // Check if employee_code or email already exists
-  const existing = await query(
-    'SELECT id FROM employees WHERE employee_code = ? OR email = ?',
+  const dupUser = await query('SELECT id FROM users WHERE email = ? LIMIT 1', [email]);
+  if (dupUser.length > 0) {
+    return sendErrorResponse(res, 400, 'That email already has a login account');
+  }
+
+  const existingEmp = await query(
+    'SELECT id FROM employees WHERE employee_code = ? OR email = ? LIMIT 1',
     [finalEmployeeCode, email]
   );
-
-  if (existing.length > 0) {
+  if (existingEmp.length > 0) {
     return sendErrorResponse(res, 400, 'Employee code or email already exists');
   }
 
-  // Hash password if provided
-  let hashedPassword = null;
-  if (password) {
-    hashedPassword = await bcrypt.hash(password, 10);
+  const hashedPassword = password ? await bcrypt.hash(password, 10) : null;
+
+  const actorId = req.employee?.id ?? null;
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    const [uRes] = await conn.execute(
+      `INSERT INTO users (email, password_hash, user_type, is_active)
+       VALUES (?, ?, 'employee', TRUE)`,
+      [email, hashedPassword]
+    );
+    const userId = uRes.insertId;
+
+    const [eRes] = await conn.execute(
+      `INSERT INTO employees
+       (user_id, employee_code, first_name, last_name, email, phone, date_of_birth,
+        gender, address, hire_date, salary, role_id,
+        created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        userId,
+        finalEmployeeCode,
+        first_name,
+        last_name,
+        email,
+        phone || null,
+        date_of_birth || null,
+        gender || 'other',
+        address || null,
+        hire_date,
+        salary || null,
+        role_id,
+        actorId,
+        actorId
+      ]
+    );
+    const employeeId = eRes.insertId;
+
+    await conn.execute(
+      `INSERT INTO user_roles (user_id, role_id, created_by, updated_by)
+       VALUES (?, ?, ?, ?)`,
+      [userId, role_id, actorId, actorId]
+    );
+
+    await conn.commit();
+
+    const employees = await query(
+      `SELECT e.*, r.name as role_name, r.description as role_description
+       FROM employees e
+       INNER JOIN roles r ON e.role_id = r.id
+       WHERE e.id = ?`,
+      [employeeId]
+    );
+
+    sendSuccessResponse(res, 201, { employee: employees[0] }, 'Employee created successfully');
+  } catch (err) {
+    if (conn) await conn.rollback();
+    throw err;
+  } finally {
+    if (conn) conn.release();
   }
-
-  // Insert employee
-  const result = await query(
-    `INSERT INTO employees 
-     (employee_code, first_name, last_name, email, password, phone, date_of_birth, 
-      gender, address, hire_date, salary, role_id, created_by, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      finalEmployeeCode,
-      first_name,
-      last_name,
-      email,
-      hashedPassword,
-      phone || null,
-      date_of_birth || null,
-      gender || 'other',
-      address || null,
-      hire_date,
-      salary || null,
-      role_id,
-      req.employee.id,
-      req.employee.id
-    ]
-  );
-
-  // Get created employee
-  const employees = await query(
-    `SELECT e.*, r.name as role_name, r.description as role_description
-     FROM employees e
-     INNER JOIN roles r ON e.role_id = r.id
-     WHERE e.id = ?`,
-    [result.insertId]
-  );
-
-  const employee = employees[0];
-  delete employee.password;
-
-  sendSuccessResponse(res, 201, { employee }, 'Employee created successfully');
 });
 
 /**
@@ -293,30 +319,33 @@ exports.updateEmployee = asyncHandler(async (req, res, next) => {
     is_active
   } = req.body;
 
-  // Check if employee exists and is not soft deleted
-  const existing = await query('SELECT id, deleted_at FROM employees WHERE id = ?', [id]);
-  if (existing.length === 0) {
+  const existingRow = await query(
+    'SELECT id, user_id, deleted_at FROM employees WHERE id = ?',
+    [id]
+  );
+  if (existingRow.length === 0) {
     return sendErrorResponse(res, 404, 'Employee not found');
   }
-  if (existing[0].deleted_at !== null) {
+  if (existingRow[0].deleted_at !== null) {
     return sendErrorResponse(res, 403, 'Cannot update a deleted employee');
   }
 
-  // Check if employee_code or email already exists (excluding current employee)
+  const userId = existingRow[0].user_id;
+
   if (employee_code || email) {
     const conditions = [];
     const checkParams = [];
-    
+
     if (employee_code) {
       conditions.push('employee_code = ?');
       checkParams.push(employee_code);
     }
-    
+
     if (email) {
       conditions.push('email = ?');
       checkParams.push(email);
     }
-    
+
     if (conditions.length > 0) {
       checkParams.push(id);
       const duplicate = await query(
@@ -329,45 +358,98 @@ exports.updateEmployee = asyncHandler(async (req, res, next) => {
     }
   }
 
-  // Build update query dynamically
+  if (email) {
+    const dupUser = await query('SELECT id FROM users WHERE email = ? AND id != ?', [email, userId]);
+    if (dupUser.length > 0) {
+      return sendErrorResponse(res, 400, 'That email is already used by another account');
+    }
+  }
+
+  if (password) {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await query('UPDATE users SET password_hash = ? WHERE id = ?', [hashedPassword, userId]);
+  }
+
+  if (email) {
+    await query('UPDATE users SET email = ? WHERE id = ?', [email, userId]);
+  }
+
   const updates = [];
   const params = [];
 
-  if (employee_code) { updates.push('employee_code = ?'); params.push(employee_code); }
-  if (first_name) { updates.push('first_name = ?'); params.push(first_name); }
-  if (last_name) { updates.push('last_name = ?'); params.push(last_name); }
-  if (email) { updates.push('email = ?'); params.push(email); }
-  if (phone !== undefined) { updates.push('phone = ?'); params.push(phone); }
-  if (date_of_birth) { updates.push('date_of_birth = ?'); params.push(date_of_birth); }
-  if (gender) { updates.push('gender = ?'); params.push(gender); }
-  if (address !== undefined) { updates.push('address = ?'); params.push(address); }
-  if (hire_date) { updates.push('hire_date = ?'); params.push(hire_date); }
-  if (salary !== undefined) { updates.push('salary = ?'); params.push(salary); }
-  if (role_id) { updates.push('role_id = ?'); params.push(role_id); }
-  if (is_active !== undefined) { updates.push('is_active = ?'); params.push(is_active); }
-
-  // Handle password update
-  if (password) {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    updates.push('password = ?');
-    params.push(hashedPassword);
+  if (employee_code) {
+    updates.push('employee_code = ?');
+    params.push(employee_code);
+  }
+  if (first_name) {
+    updates.push('first_name = ?');
+    params.push(first_name);
+  }
+  if (last_name) {
+    updates.push('last_name = ?');
+    params.push(last_name);
+  }
+  if (email) {
+    updates.push('email = ?');
+    params.push(email);
+  }
+  if (phone !== undefined) {
+    updates.push('phone = ?');
+    params.push(phone);
+  }
+  if (date_of_birth) {
+    updates.push('date_of_birth = ?');
+    params.push(date_of_birth);
+  }
+  if (gender) {
+    updates.push('gender = ?');
+    params.push(gender);
+  }
+  if (address !== undefined) {
+    updates.push('address = ?');
+    params.push(address);
+  }
+  if (hire_date) {
+    updates.push('hire_date = ?');
+    params.push(hire_date);
+  }
+  if (salary !== undefined) {
+    updates.push('salary = ?');
+    params.push(salary);
+  }
+  if (role_id) {
+    updates.push('role_id = ?');
+    params.push(role_id);
+  }
+  if (is_active !== undefined) {
+    updates.push('is_active = ?');
+    params.push(is_active);
   }
 
   updates.push('updated_by = ?');
   params.push(req.employee.id);
   params.push(id);
 
-  // Check if there are any updates (besides updated_by)
-  if (updates.length <= 1) {
+  if (updates.length <= 1 && !password && !email) {
     return sendErrorResponse(res, 400, 'No fields to update');
   }
 
-  await query(
-    `UPDATE employees SET ${updates.join(', ')} WHERE id = ?`,
-    params
-  );
+  if (updates.length > 1) {
+    await query(`UPDATE employees SET ${updates.join(', ')} WHERE id = ?`, params);
+  }
 
-  // Get updated employee
+  if (role_id !== undefined && role_id !== null) {
+    await query('DELETE FROM user_roles WHERE user_id = ?', [userId]);
+    await query(
+      `INSERT INTO user_roles (user_id, role_id, created_by, updated_by) VALUES (?, ?, ?, ?)`,
+      [userId, role_id, req.employee.id, req.employee.id]
+    );
+  }
+
+  if (is_active !== undefined) {
+    await query('UPDATE users SET is_active = ? WHERE id = ?', [is_active, userId]);
+  }
+
   const employees = await query(
     `SELECT e.*, r.name as role_name, r.description as role_description
      FROM employees e
@@ -376,10 +458,7 @@ exports.updateEmployee = asyncHandler(async (req, res, next) => {
     [id]
   );
 
-  const employee = employees[0];
-  delete employee.password;
-
-  sendSuccessResponse(res, 200, { employee }, 'Employee updated successfully');
+  sendSuccessResponse(res, 200, { employee: employees[0] }, 'Employee updated successfully');
 });
 
 /**
@@ -400,6 +479,14 @@ exports.deleteEmployee = asyncHandler(async (req, res, next) => {
   await query(
     'UPDATE employees SET is_active = FALSE, deleted_at = NOW(), updated_by = ? WHERE id = ?',
     [req.employee.id, id]
+  );
+
+  await query(
+    `UPDATE users u
+     INNER JOIN employees e ON e.user_id = u.id
+     SET u.is_active = FALSE
+     WHERE e.id = ?`,
+    [id]
   );
 
   sendSuccessResponse(res, 200, null, 'Employee deleted successfully');

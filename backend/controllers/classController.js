@@ -20,7 +20,7 @@ exports.getAllClasses = asyncHandler(async (req, res, next) => {
            e.first_name as teacher_first_name, 
            e.last_name as teacher_last_name,
            e.employee_code as teacher_code,
-           (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id AND s.is_active = TRUE) as student_count
+           (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id AND s.deleted_at IS NULL AND s.is_active = TRUE) as student_count
     FROM classes c
     LEFT JOIN employees e ON c.teacher_id = e.id
     WHERE 1=1
@@ -116,7 +116,7 @@ exports.getClassById = asyncHandler(async (req, res, next) => {
             e.first_name as teacher_first_name, 
             e.last_name as teacher_last_name,
             e.employee_code as teacher_code,
-            (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id AND s.is_active = TRUE) as student_count
+            (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id AND s.deleted_at IS NULL AND s.is_active = TRUE) as student_count
      FROM classes c
      LEFT JOIN employees e ON c.teacher_id = e.id
      WHERE c.id = ?`,
@@ -152,20 +152,19 @@ exports.createClass = asyncHandler(async (req, res, next) => {
     return sendErrorResponse(res, 400, 'Please provide all required fields');
   }
 
-  // Check if class_name or class_code already exists
-  const existing = await query(
-    'SELECT id FROM classes WHERE class_name = ? OR class_code = ?',
-    [class_name, class_code]
+  const duplicateCodeYear = await query(
+    'SELECT id FROM classes WHERE academic_year = ? AND class_code = ? LIMIT 1',
+    [academic_year, class_code]
   );
 
-  if (existing.length > 0) {
-    return sendErrorResponse(res, 400, 'Class name or code already exists');
+  if (duplicateCodeYear.length > 0) {
+    return sendErrorResponse(res, 400, 'That class code is already used for this academic year');
   }
 
   // Validate teacher if provided
   if (teacher_id) {
     const teacher = await query(
-      'SELECT id, is_active FROM employees WHERE id = ? AND is_active = TRUE',
+      'SELECT id, is_active FROM employees WHERE id = ? AND deleted_at IS NULL AND is_active = TRUE',
       [teacher_id]
     );
     if (teacher.length === 0) {
@@ -242,30 +241,23 @@ exports.updateClass = asyncHandler(async (req, res, next) => {
     return sendErrorResponse(res, 403, 'Cannot update a deleted class');
   }
 
-  // Check if class_name or class_code already exists (excluding current class)
-  if (class_name || class_code) {
-    const conditions = [];
-    const checkParams = [];
-    
-    if (class_name) {
-      conditions.push('class_name = ?');
-      checkParams.push(class_name);
-    }
-    
-    if (class_code) {
-      conditions.push('class_code = ?');
-      checkParams.push(class_code);
-    }
-    
-    if (conditions.length > 0) {
-      checkParams.push(id);
-      const duplicate = await query(
-        `SELECT id FROM classes WHERE (${conditions.join(' OR ')}) AND id != ?`,
-        checkParams
-      );
-      if (duplicate.length > 0) {
-        return sendErrorResponse(res, 400, 'Class name or code already exists');
-      }
+  const currentRows = await query(
+    'SELECT academic_year, class_code FROM classes WHERE id = ?',
+    [id]
+  );
+  const mergedYear =
+    academic_year !== undefined ? academic_year : currentRows[0]?.academic_year;
+  const mergedCode = class_code !== undefined ? class_code : currentRows[0]?.class_code;
+
+  if (academic_year !== undefined || class_code !== undefined) {
+    const dup = await query(
+      `SELECT id FROM classes
+       WHERE id != ? AND academic_year = ? AND class_code = ?
+       LIMIT 1`,
+      [id, mergedYear, mergedCode]
+    );
+    if (dup.length > 0) {
+      return sendErrorResponse(res, 400, 'That class code is already used for this academic year');
     }
   }
 
@@ -283,11 +275,20 @@ exports.updateClass = asyncHandler(async (req, res, next) => {
   if (teacher_id !== undefined) { updates.push('teacher_id = ?'); params.push(teacher_id); }
   if (is_active !== undefined) { updates.push('is_active = ?'); params.push(is_active); }
 
+  if (teacher_id !== undefined && teacher_id !== null && teacher_id !== '') {
+    const teacher = await query(
+      'SELECT id FROM employees WHERE id = ? AND deleted_at IS NULL AND is_active = TRUE',
+      [teacher_id]
+    );
+    if (teacher.length === 0) {
+      return sendErrorResponse(res, 400, 'Teacher not found or inactive');
+    }
+  }
+
   updates.push('updated_by = ?');
   params.push(req.employee.id);
   params.push(id);
 
-  // Check if there are any updates (besides updated_by)
   if (updates.length <= 1) {
     return sendErrorResponse(res, 400, 'No fields to update');
   }

@@ -12,7 +12,8 @@ import SelectInput from "@/components/form/SelectInput";
 import Input from "@/components/form/input/InputField";
 import Label from "@/components/form/Label";
 import { useToast } from "@/components/ui/toast/ToastProvider";
-import { useAuth } from "@/context/AuthContext";
+import { useCourseNoteAccess } from "@/hooks/usePermissions";
+import PermissionGate from "@/components/auth/PermissionGate";
 
 const formatSemester = (semester: number) => `Semester ${semester}`;
 
@@ -41,13 +42,8 @@ export default function StudentGradesPage() {
   const [formFinalTotal, setFormFinalTotal] = useState<string>("100");
   const [isSaving, setIsSaving] = useState(false);
 
-  const { user } = useAuth();
   const { showToast } = useToast();
-
-  const isAdminOrPrincipal =
-    user?.role_name?.toLowerCase() === "admin" ||
-    user?.role_name?.toLowerCase() === "principal";
-  const isTeacher = user?.role_name?.toLowerCase() === "teacher";
+  const { canWrite, canView } = useCourseNoteAccess();
 
   useEffect(() => {
     if (!studentId || Number.isNaN(studentId)) return;
@@ -95,7 +91,15 @@ export default function StudentGradesPage() {
     return acc;
   }, {});
 
-  const canAddNote = isAdminOrPrincipal || isTeacher;
+  const canAddNote = canWrite;
+
+  if (!canView) {
+    return (
+      <p className="text-sm text-gray-500 dark:text-gray-400">
+        You do not have permission to view grades.
+      </p>
+    );
+  }
 
   const resetForm = () => {
     setFormAcademicYear("");
@@ -210,11 +214,11 @@ export default function StudentGradesPage() {
           )}
         </div>
         <div className="flex gap-2">
-          {canAddNote && (
+          <PermissionGate permissions={["course_note.write", "course_note.manage"]}>
             <Button type="button" size="sm" onClick={handleOpenAdd}>
               Add Note
             </Button>
-          )}
+          </PermissionGate>
           <Button type="button" variant="outline" size="sm" onClick={() => router.back()}>
             Back
           </Button>
@@ -293,7 +297,7 @@ export default function StudentGradesPage() {
       )}
 
       {/* Add Note Modal */}
-      {canAddNote && (
+      {canAddNote ? (
         <Modal
           isOpen={isAddOpen}
           onClose={handleCloseAdd}
@@ -441,7 +445,7 @@ export default function StudentGradesPage() {
             </form>
           </div>
         </Modal>
-      )}
+      ) : null}
     </div>
   );
 }

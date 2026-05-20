@@ -1,5 +1,7 @@
-const { query } = require('../config/database');
+const bcrypt = require('bcryptjs');
+const { query, pool } = require('../config/database');
 const { asyncHandler, sendSuccessResponse, sendErrorResponse } = require('../utils/helpers');
+const { getActorEmployeeId } = require('../utils/actor');
 
 /**
  * @desc    Get all students
@@ -116,6 +118,64 @@ exports.getStudentById = asyncHandler(async (req, res, next) => {
   sendSuccessResponse(res, 200, { student: students[0] }, 'Student retrieved successfully');
 });
 
+const STUDENT_CODE_PREFIX = 'STU';
+const STUDENT_CODE_PAD = 3;
+
+/**
+ * Next code: STU000, STU001, … (3+ digits when needed).
+ * @returns {Promise<string>}
+ */
+const generateStudentCode = async () => {
+  const result = await query(
+    `SELECT student_code
+     FROM students
+     WHERE student_code LIKE ?
+     ORDER BY CAST(SUBSTRING(student_code, 4) AS UNSIGNED) DESC
+     LIMIT 1`,
+    [`${STUDENT_CODE_PREFIX}%`]
+  );
+
+  let nextNumber = 0;
+
+  if (result.length > 0) {
+    const lastCode = result[0].student_code;
+    const lastNumber = parseInt(lastCode.substring(STUDENT_CODE_PREFIX.length), 10);
+    if (!Number.isNaN(lastNumber)) {
+      nextNumber = lastNumber + 1;
+    }
+  }
+
+  const formatCode = (n) =>
+    `${STUDENT_CODE_PREFIX}${String(n).padStart(STUDENT_CODE_PAD, '0')}`;
+
+  let studentCode = formatCode(nextNumber);
+
+  const maxRetries = 100;
+  let retries = 0;
+
+  while (retries < maxRetries) {
+    const exists = await query('SELECT id FROM students WHERE student_code = ?', [studentCode]);
+    if (exists.length === 0) {
+      return studentCode;
+    }
+    nextNumber += 1;
+    studentCode = formatCode(nextNumber);
+    retries += 1;
+  }
+
+  throw new Error('Unable to generate unique student code after maximum retries');
+};
+
+/**
+ * @desc    Preview next auto-generated student code
+ * @route   GET /api/students/next-code
+ * @access  Private
+ */
+exports.getNextStudentCode = asyncHandler(async (req, res, next) => {
+  const student_code = await generateStudentCode();
+  sendSuccessResponse(res, 200, { student_code }, 'Next student code generated');
+});
+
 /**
  * @desc    Create new student
  * @route   POST /api/students
@@ -127,6 +187,7 @@ exports.createStudent = asyncHandler(async (req, res, next) => {
     first_name,
     last_name,
     email,
+    password,
     phone,
     date_of_birth,
     gender,
@@ -138,20 +199,34 @@ exports.createStudent = asyncHandler(async (req, res, next) => {
     class_id
   } = req.body;
 
-  // Validate required fields
-  if (!student_code || !first_name || !last_name || !date_of_birth || !enrollment_date) {
+  if (!first_name || !last_name || !date_of_birth || !enrollment_date) {
     return sendErrorResponse(res, 400, 'Please provide all required fields');
   }
 
-  // Check if student_code or email already exists
-  const checkConditions = ['student_code = ?'];
-  const checkParams = [student_code];
-  
-  if (email) {
-    checkConditions.push('email = ?');
-    checkParams.push(email);
+  let finalStudentCode = student_code?.trim() || null;
+  if (!finalStudentCode) {
+    finalStudentCode = await generateStudentCode();
   }
-  
+
+  const contactEmail = email?.trim() || null;
+  const portalPassword = password?.trim() || null;
+
+  if (portalPassword && !contactEmail) {
+    return sendErrorResponse(
+      res,
+      400,
+      'Portal login requires a student email when a password is provided'
+    );
+  }
+
+  const checkConditions = ['student_code = ?'];
+  const checkParams = [finalStudentCode];
+
+  if (contactEmail) {
+    checkConditions.push('email = ?');
+    checkParams.push(contactEmail);
+  }
+
   const existing = await query(
     `SELECT id FROM students WHERE ${checkConditions.join(' OR ')}`,
     checkParams
@@ -161,44 +236,73 @@ exports.createStudent = asyncHandler(async (req, res, next) => {
     return sendErrorResponse(res, 400, 'Student code or email already exists');
   }
 
-  // Insert student
-  const result = await query(
-    `INSERT INTO students 
-     (student_code, first_name, last_name, email, phone, date_of_birth, gender, 
-      address, parent_name, parent_phone, parent_email, enrollment_date, class_id, created_by, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      student_code,
-      first_name,
-      last_name,
-      email || null,
-      phone || null,
-      date_of_birth,
-      gender || 'other',
-      address || null,
-      parent_name || null,
-      parent_phone || null,
-      parent_email || null,
-      enrollment_date,
-      class_id || null,
-      req.employee.id,
-      req.employee.id
-    ]
-  );
+  if (contactEmail && portalPassword) {
+    const dupUser = await query('SELECT id FROM users WHERE email = ? LIMIT 1', [contactEmail]);
+    if (dupUser.length > 0) {
+      return sendErrorResponse(res, 400, 'That email already has a login account');
+    }
+  }
 
-  // Get created student
-  const students = await query(
-    `SELECT s.*, 
-            c.class_name, 
-            c.class_code,
-            c.grade_level
-     FROM students s
-     LEFT JOIN classes c ON s.class_id = c.id
-     WHERE s.id = ?`,
-    [result.insertId]
-  );
+  const actorId = getActorEmployeeId(req);
+  let conn;
 
-  sendSuccessResponse(res, 201, { student: students[0] }, 'Student created successfully');
+  try {
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    let userId = null;
+    if (contactEmail && portalPassword) {
+      const hashedPassword = await bcrypt.hash(portalPassword, 10);
+      const [uRes] = await conn.execute(
+        `INSERT INTO users (email, password_hash, user_type, is_active) VALUES (?, ?, 'student', TRUE)`,
+        [contactEmail, hashedPassword]
+      );
+      userId = uRes.insertId;
+    }
+
+    const [sRes] = await conn.execute(
+      `INSERT INTO students
+       (user_id, student_code, first_name, last_name, email, phone, date_of_birth, gender,
+        address, parent_name, parent_phone, parent_email, enrollment_date, class_id,
+        created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        userId,
+        finalStudentCode,
+        first_name,
+        last_name,
+        contactEmail,
+        phone || null,
+        date_of_birth,
+        gender || 'other',
+        address || null,
+        parent_name || null,
+        parent_phone || null,
+        parent_email || null,
+        enrollment_date,
+        class_id || null,
+        actorId,
+        actorId
+      ]
+    );
+
+    await conn.commit();
+
+    const students = await query(
+      `SELECT s.*, c.class_name, c.class_code, c.grade_level
+       FROM students s
+       LEFT JOIN classes c ON s.class_id = c.id
+       WHERE s.id = ?`,
+      [sRes.insertId]
+    );
+
+    sendSuccessResponse(res, 201, { student: students[0] }, 'Student created successfully');
+  } catch (err) {
+    if (conn) await conn.rollback();
+    throw err;
+  } finally {
+    if (conn) conn.release();
+  }
 });
 
 /**
@@ -265,7 +369,7 @@ exports.updateStudent = asyncHandler(async (req, res, next) => {
   const updates = [];
   const params = [];
 
-  if (student_code) { updates.push('student_code = ?'); params.push(student_code); }
+  // student_code is auto-generated at create and cannot be changed
   if (first_name) { updates.push('first_name = ?'); params.push(first_name); }
   if (last_name) { updates.push('last_name = ?'); params.push(last_name); }
   if (email !== undefined) { updates.push('email = ?'); params.push(email); }
@@ -281,7 +385,7 @@ exports.updateStudent = asyncHandler(async (req, res, next) => {
   if (is_active !== undefined) { updates.push('is_active = ?'); params.push(is_active); }
 
   updates.push('updated_by = ?');
-  params.push(req.employee.id);
+  params.push(getActorEmployeeId(req));
   params.push(id);
 
   // Check if there are any updates (besides updated_by)
@@ -315,16 +419,21 @@ exports.deleteStudent = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
   // Check if student exists
-  const existing = await query('SELECT id FROM students WHERE id = ?', [id]);
+  const existing = await query('SELECT id, user_id FROM students WHERE id = ?', [id]);
   if (existing.length === 0) {
     return sendErrorResponse(res, 404, 'Student not found');
   }
 
-  // Soft delete (set is_active to false and deleted_at timestamp)
+  const actorId = getActorEmployeeId(req);
+
   await query(
     'UPDATE students SET is_active = FALSE, deleted_at = NOW(), updated_by = ? WHERE id = ?',
-    [req.employee.id, id]
+    [actorId, id]
   );
+
+  if (existing[0].user_id) {
+    await query('UPDATE users SET is_active = FALSE WHERE id = ?', [existing[0].user_id]);
+  }
 
   sendSuccessResponse(res, 200, null, 'Student deleted successfully');
 });

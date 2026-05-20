@@ -1,17 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const employeeController = require('../controllers/employeeController');
-const { protect, authorize } = require('../middleware/auth');
+const { protectEmployee, requirePermission } = require('../middleware/auth');
 
-// All routes require authentication
-router.use(protect);
+router.use(protectEmployee);
 
-// All routes require admin or principal role
-router.get('/', authorize('admin', 'principal'), employeeController.getAllEmployees);
-router.get('/:id', employeeController.getEmployeeById);
-router.post('/', authorize('admin'), employeeController.createEmployee);
-router.put('/:id', authorize('admin'), employeeController.updateEmployee);
-router.delete('/:id', authorize('admin'), employeeController.deleteEmployee);
+router.get('/', requirePermission('employee.read', 'employee.manage'), employeeController.getAllEmployees);
+router.get('/:id', requirePermission('employee.read', 'employee.manage'), employeeController.getEmployeeById);
+router.post('/', requirePermission('employee.manage'), employeeController.createEmployee);
+router.put('/:id', requirePermission('employee.manage'), employeeController.updateEmployee);
+router.delete('/:id', requirePermission('employee.manage'), employeeController.deleteEmployee);
 
 module.exports = router;
-

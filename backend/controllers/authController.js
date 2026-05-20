@@ -1,115 +1,177 @@
 const { query } = require('../config/database');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 const { asyncHandler, sendSuccessResponse, sendErrorResponse } = require('../utils/helpers');
+const { signToken } = require('../middleware/auth');
+const { loadPermissionCodesForUser } = require('../lib/rbac');
 
 /**
- * @desc    Login employee
+ * @desc    Login (staff or student portal)
  * @route   POST /api/auth/login
  * @access  Public
  */
 exports.login = asyncHandler(async (req, res, next) => {
   const { email, password } = req.body;
 
-  // Validate input
   if (!email || !password) {
     return sendErrorResponse(res, 400, 'Please provide email and password');
   }
 
-  // Find employee by email
-  const employees = await query(
-    `SELECT e.*, r.name as role_name, r.description as role_description 
-     FROM employees e 
-     INNER JOIN roles r ON e.role_id = r.id 
-     WHERE e.email = ? AND e.is_active = TRUE`,
+  const users = await query(
+    `SELECT id, email, password_hash, user_type, is_active
+     FROM users WHERE email = ?`,
     [email]
   );
 
-  if (employees.length === 0) {
+  if (users.length === 0) {
     return sendErrorResponse(res, 401, 'Invalid email or password');
   }
 
-  const employee = employees[0];
+  const user = users[0];
 
-  // Check if employee has a password set
-  if (!employee.password) {
+  if (!user.is_active) {
+    return sendErrorResponse(res, 401, 'Account is inactive');
+  }
+
+  if (!user.password_hash) {
     return sendErrorResponse(res, 401, 'Account not properly configured. Please contact administrator.');
   }
 
-  // Verify password
-  const isPasswordValid = await bcrypt.compare(password, employee.password);
-
-  if (!isPasswordValid) {
+  const valid = await bcrypt.compare(password, user.password_hash);
+  if (!valid) {
     return sendErrorResponse(res, 401, 'Invalid email or password');
   }
 
-  // Generate JWT token
-  const token = jwt.sign(
-    {
-      id: employee.id,
-      email: employee.email,
-      role_id: employee.role_id,
-      role_name: employee.role_name
-    },
-    process.env.JWT_SECRET || 'coming-soon-change-on-production',
-    {
-      expiresIn: process.env.JWT_EXPIRE || '7d'
+  if (user.user_type === 'employee') {
+    const employees = await query(
+      `SELECT e.*, r.slug AS role_slug, r.name AS role_name, r.description AS role_description
+       FROM employees e
+       INNER JOIN roles r ON e.role_id = r.id
+       WHERE e.user_id = ?
+         AND e.deleted_at IS NULL
+         AND r.deleted_at IS NULL
+         AND e.is_active = TRUE`,
+      [user.id]
+    );
+
+    if (employees.length === 0) {
+      return sendErrorResponse(res, 401, 'Employee profile not found or inactive');
     }
-  );
 
-  // Remove password from response
-  delete employee.password;
+    const employee = employees[0];
+    const permissions = await loadPermissionCodesForUser(user.id);
 
-  // Send response with token
-  sendSuccessResponse(res, 200, {
-    employee: {
-      id: employee.id,
-      employee_code: employee.employee_code,
-      first_name: employee.first_name,
-      last_name: employee.last_name,
-      email: employee.email,
-      role_id: employee.role_id,
-      role_name: employee.role_name,
-      role_description: employee.role_description
-    },
-    token
-  }, 'Login successful');
+    const token = signToken({
+      userId: user.id,
+      type: 'employee',
+      profileId: employee.id,
+      roleSlug: employee.role_slug
+    });
+
+    return sendSuccessResponse(
+      res,
+      200,
+      {
+        account_type: 'employee',
+        employee: {
+          id: employee.id,
+          employee_code: employee.employee_code,
+          first_name: employee.first_name,
+          last_name: employee.last_name,
+          email: employee.email,
+          role_id: employee.role_id,
+          role_slug: employee.role_slug,
+          role_name: employee.role_name,
+          role_description: employee.role_description
+        },
+        permissions: [...permissions],
+        token
+      },
+      'Login successful'
+    );
+  }
+
+  if (user.user_type === 'student') {
+    const students = await query(
+      `SELECT s.*, c.class_name, c.class_code, c.grade_level
+       FROM students s
+       LEFT JOIN classes c ON s.class_id = c.id
+       WHERE s.user_id = ?
+         AND s.deleted_at IS NULL
+         AND s.is_active = TRUE`,
+      [user.id]
+    );
+
+    if (students.length === 0) {
+      return sendErrorResponse(res, 401, 'Student profile not found or inactive');
+    }
+
+    const student = students[0];
+
+    const token = signToken({
+      userId: user.id,
+      type: 'student',
+      profileId: student.id
+    });
+
+    return sendSuccessResponse(
+      res,
+      200,
+      {
+        account_type: 'student',
+        student: {
+          id: student.id,
+          student_code: student.student_code,
+          first_name: student.first_name,
+          last_name: student.last_name,
+          email: student.email,
+          class_id: student.class_id,
+          class_name: student.class_name,
+          class_code: student.class_code,
+          grade_level: student.grade_level
+        },
+        token
+      },
+      'Login successful'
+    );
+  }
+
+  return sendErrorResponse(res, 401, 'Unsupported account type');
 });
 
 /**
- * @desc    Get current logged in employee
+ * @desc    Current account (employee or student)
  * @route   GET /api/auth/me
  * @access  Private
  */
 exports.getMe = asyncHandler(async (req, res, next) => {
-  const employeeId = req.employee.id;
-
-  const employees = await query(
-    `SELECT e.*, r.name as role_name, r.description as role_description 
-     FROM employees e 
-     INNER JOIN roles r ON e.role_id = r.id 
-     WHERE e.id = ? AND e.is_active = TRUE`,
-    [employeeId]
-  );
-
-  if (employees.length === 0) {
-    return sendErrorResponse(res, 404, 'Employee not found');
+  if (req.employee) {
+    return sendSuccessResponse(
+      res,
+      200,
+      {
+        account_type: 'employee',
+        employee: req.employee,
+        permissions: [...(req.permissions || [])]
+      },
+      'Profile retrieved successfully'
+    );
   }
 
-  const employee = employees[0];
-  delete employee.password;
+  if (req.student) {
+    return sendSuccessResponse(
+      res,
+      200,
+      {
+        account_type: 'student',
+        student: req.student
+      },
+      'Profile retrieved successfully'
+    );
+  }
 
-  sendSuccessResponse(res, 200, { employee }, 'Employee retrieved successfully');
+  return sendErrorResponse(res, 401, 'Not authenticated');
 });
 
-/**
- * @desc    Logout employee (client-side token removal)
- * @route   POST /api/auth/logout
- * @access  Private
- */
 exports.logout = asyncHandler(async (req, res, next) => {
-  // Since we're using JWT, logout is handled client-side by removing the token
-  // But we can log the logout action if needed
   sendSuccessResponse(res, 200, null, 'Logout successful');
 });
-

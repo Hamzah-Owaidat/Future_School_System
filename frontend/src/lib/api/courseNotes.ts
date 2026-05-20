@@ -69,6 +69,25 @@ export const courseNotesApi = {
     return [];
   },
 
+  // GET /api/course-notes/me (student portal)
+  getMy: async (academicYear?: string): Promise<CourseNote[]> => {
+    const params = academicYear ? { academic_year: academicYear } : {};
+    const response = await api.get<CourseNote[]>("/course-notes/me", { params });
+    const payload: Record<string, unknown> = response.data as Record<string, unknown>;
+
+    if (Array.isArray(payload?.data)) {
+      return payload.data as CourseNote[];
+    }
+    const inner = payload?.data as Record<string, unknown> | undefined;
+    if (Array.isArray(inner?.notes)) {
+      return inner.notes as CourseNote[];
+    }
+    if (Array.isArray(payload?.notes)) {
+      return payload.notes as CourseNote[];
+    }
+    return [];
+  },
+
   // GET /api/course-notes/student/:studentId
   getByStudent: async (studentId: number, academicYear?: string): Promise<CourseNote[]> => {
     const params = academicYear ? { academic_year: academicYear } : {};

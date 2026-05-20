@@ -1,6 +1,15 @@
 const { query } = require('../config/database');
 const { asyncHandler, sendSuccessResponse, sendErrorResponse } = require('../utils/helpers');
 
+function slugifyRole(value) {
+  const base = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return base || `role_${Date.now()}`;
+}
+
 /**
  * @desc    Get all roles
  * @route   GET /api/roles
@@ -14,7 +23,14 @@ exports.getAllRoles = asyncHandler(async (req, res, next) => {
             COUNT(DISTINCT e.id) as employee_count,
             COUNT(DISTINCT rp.permission_id) as permission_count
      FROM roles r
-     LEFT JOIN employees e ON r.id = e.role_id AND e.is_active = TRUE AND e.deleted_at IS NULL
+     LEFT JOIN employees e ON e.deleted_at IS NULL AND e.is_active = TRUE
+       AND (
+         e.role_id = r.id
+         OR EXISTS (
+           SELECT 1 FROM user_roles ur
+           WHERE ur.user_id = e.user_id AND ur.role_id = r.id
+         )
+       )
      LEFT JOIN role_permissions rp ON r.id = rp.role_id
      WHERE 1=1
   `;
@@ -76,11 +92,18 @@ exports.getRoleById = asyncHandler(async (req, res, next) => {
  * @access  Private (Admin)
  */
 exports.createRole = asyncHandler(async (req, res, next) => {
-  const { name, description, is_active, permission_ids } = req.body;
+  const { name, slug: slugInput, description, is_active, permission_ids } = req.body;
 
   // Validate required fields
   if (!name) {
     return sendErrorResponse(res, 400, 'Please provide role name');
+  }
+
+  const slug = slugifyRole(slugInput || name);
+
+  const existingSlug = await query('SELECT id FROM roles WHERE slug = ?', [slug]);
+  if (existingSlug.length > 0) {
+    return sendErrorResponse(res, 400, 'Role slug already exists');
   }
 
   // Check if role name already exists
@@ -91,9 +114,10 @@ exports.createRole = asyncHandler(async (req, res, next) => {
 
   // Insert role
   const result = await query(
-    `INSERT INTO roles (name, description, is_active, created_by, updated_by)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO roles (slug, name, description, is_active, created_by, updated_by)
+     VALUES (?, ?, ?, ?, ?, ?)`,
     [
+      slug,
       name,
       description || null,
       is_active !== undefined ? is_active : true,
@@ -240,16 +264,26 @@ exports.updateRole = asyncHandler(async (req, res, next) => {
 exports.deleteRole = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
 
-  // Check if role exists
-  const existing = await query('SELECT id FROM roles WHERE id = ?', [id]);
+  const existing = await query('SELECT id, is_system FROM roles WHERE id = ?', [id]);
   if (existing.length === 0) {
     return sendErrorResponse(res, 404, 'Role not found');
   }
+  if (existing[0].is_system === 1 || existing[0].is_system === true) {
+    return sendErrorResponse(res, 403, 'System roles cannot be deleted');
+  }
 
-  // Check if role is being used by employees
-  const employees = await query('SELECT id FROM employees WHERE role_id = ? AND is_active = TRUE', [id]);
+  const employees = await query(
+    `SELECT e.id FROM employees e
+     WHERE e.deleted_at IS NULL AND e.is_active = TRUE AND (
+       e.role_id = ? OR EXISTS (
+         SELECT 1 FROM user_roles ur WHERE ur.user_id = e.user_id AND ur.role_id = ?
+       )
+     )
+     LIMIT 1`,
+    [id, id]
+  );
   if (employees.length > 0) {
-    return sendErrorResponse(res, 400, 'Cannot delete role. It is assigned to active employees.');
+    return sendErrorResponse(res, 400, 'Cannot delete role — it is still assigned to active staff.');
   }
 
   // Delete role permissions first (CASCADE should handle this, but being explicit)

@@ -1,7 +1,3 @@
-﻿-- FuturSchool reference DDL (see database/migrations for installs)
-SET NAMES utf8mb4;
-CREATE DATABASE IF NOT EXISTS futurschool CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE futurschool;
 -- ============================================
 -- FuturSchool baseline schema
 -- Auth: users + user_roles (RBAC). employees.user_id -> users.
@@ -98,7 +94,7 @@ CREATE TABLE IF NOT EXISTS employees (
     employee_code VARCHAR(20) NOT NULL,
     first_name VARCHAR(100) NOT NULL,
     last_name VARCHAR(100) NOT NULL,
-    email VARCHAR(190) NOT NULL COMMENT 'Mirror of users.email â€” keep synced in app layer',
+    email VARCHAR(190) NOT NULL COMMENT 'Mirror of users.email — keep synced in app layer',
     phone VARCHAR(30) NULL,
     date_of_birth DATE NULL,
     gender VARCHAR(32) NULL,
@@ -148,7 +144,7 @@ CREATE TABLE IF NOT EXISTS classes (
 
 CREATE TABLE IF NOT EXISTS students (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id INT NULL COMMENT 'Optional portal login â€” same row as users when set',
+    user_id INT NULL COMMENT 'Optional portal login — same row as users when set',
     student_code VARCHAR(20) NOT NULL,
     first_name VARCHAR(100) NOT NULL,
     last_name VARCHAR(100) NOT NULL,
@@ -243,4 +239,3 @@ CREATE TABLE IF NOT EXISTS course_notes (
     INDEX idx_cn_teacher (teacher_id),
     INDEX idx_cn_year_sem (academic_year, semester)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-

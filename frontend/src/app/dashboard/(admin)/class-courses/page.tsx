@@ -14,6 +14,8 @@ import { classesApi, type Class } from "@/lib/api/classes";
 import { coursesApi, type Course } from "@/lib/api/courses";
 import { employeeApi, type Employee } from "@/lib/api/employees";
 import { useAuth } from "@/context/AuthContext";
+import { useResourceAccess } from "@/hooks/usePermissions";
+import PermissionGate from "@/components/auth/PermissionGate";
 
 type Filters = {
   academic_year: string;
@@ -61,19 +63,19 @@ export default function ClassCoursesPage() {
   const [selectedAssignment, setSelectedAssignment] = useState<ClassCourse | null>(null);
   const [formState, setFormState] = useState<AssignmentFormState>(initialFormState);
 
-  const { user } = useAuth();
+  const { session } = useAuth();
   const { showToast } = useToast();
+  const { canRead, canManage } = useResourceAccess("course");
 
-  const isAdminOrPrincipal =
-    user?.role_name?.toLowerCase() === "admin" || user?.role_name?.toLowerCase() === "principal";
-  const isTeacher = user?.role_name?.toLowerCase() === "teacher";
+  const employeeId = session?.employee?.id;
+  const isScopedReader = canRead && !canManage;
 
   const effectiveTeacherId = useMemo(() => {
-    if (isTeacher && user?.id) {
-      return user.id;
+    if (isScopedReader && employeeId) {
+      return employeeId;
     }
     return filters.teacher_id ? parseInt(filters.teacher_id, 10) : undefined;
-  }, [filters.teacher_id, isTeacher, user]);
+  }, [filters.teacher_id, isScopedReader, employeeId]);
 
   const loadReferenceData = async () => {
     try {
@@ -406,26 +408,26 @@ export default function ClassCoursesPage() {
             <ToggleSwitch
               checked={value === 1}
               onChange={(checked) => {
-                // Only admins/principals can toggle
-                if (!isAdminOrPrincipal) return;
+                if (!canManage) return;
                 void handleToggleActive(row.id, checked);
               }}
+              disabled={!canManage}
             />
           </div>
         ),
       },
     ],
-    []
+    [canManage]
   );
 
   const actions: ActionHandlers<ClassCourse> = useMemo(
     () => ({
-      onView: openViewModal,
-      onEdit: isAdminOrPrincipal ? openEditModal : undefined,
-      onDelete: isAdminOrPrincipal ? handleDelete : undefined,
+      onView: canRead ? openViewModal : undefined,
+      onEdit: canManage ? openEditModal : undefined,
+      onDelete: canManage ? handleDelete : undefined,
       customActions: [],
     }),
-    [isAdminOrPrincipal]
+    [canRead, canManage]
   );
 
   return (
@@ -439,11 +441,11 @@ export default function ClassCoursesPage() {
             Assign teachers to classes and courses for each academic year.
           </p>
         </div>
-        {isAdminOrPrincipal && (
+        <PermissionGate permissions={["course.manage"]}>
           <Button type="button" onClick={openAddModal} size="sm">
             Add Assignment
           </Button>
-        )}
+        </PermissionGate>
       </div>
 
       {/* Filters */}
@@ -492,21 +494,20 @@ export default function ClassCoursesPage() {
           <Label>Teacher</Label>
           <SelectInput
             name="filter_teacher_id"
-            placeholder={isTeacher ? "Me" : "All teachers"}
+            placeholder={isScopedReader ? "Me" : "All teachers"}
             options={[
-              { value: "", label: isTeacher ? "Me" : "All" },
+              { value: "", label: isScopedReader ? "Me" : "All" },
               ...teachers.map((teacher) => ({
                 value: teacher.id,
                 label: `${teacher.first_name} ${teacher.last_name}`,
               })),
             ]}
-            value={isTeacher ? String(user?.id ?? "") : filters.teacher_id}
+            value={isScopedReader ? String(employeeId ?? "") : filters.teacher_id}
             onChange={(e) => {
-              if (!isTeacher) {
+              if (!isScopedReader) {
                 handleFilterChange("teacher_id", e.target.value);
               }
             }}
-            disabled={isTeacher}
           />
         </div>
         <div>
@@ -560,7 +561,6 @@ export default function ClassCoursesPage() {
                 <Label>Academic Year <span className="text-red-500">*</span></Label>
                 <Input
                   placeholder="e.g. 2024-2025"
-                  required
                   value={formState.academic_year}
                   onChange={(e) =>
                     handleFormChange("academic_year", e.target.value)
@@ -572,7 +572,6 @@ export default function ClassCoursesPage() {
                 <SelectInput
                   name="class_id"
                   placeholder="Select a class..."
-                  required
                   options={classes.map((cls) => ({
                     value: cls.id,
                     label: `${cls.class_name} (${cls.class_code})`,
@@ -588,7 +587,6 @@ export default function ClassCoursesPage() {
                 <SelectInput
                   name="course_id"
                   placeholder="Select a course..."
-                  required
                   options={courses.map((course) => ({
                     value: course.id,
                     label: `${course.name} (${course.code})`,
@@ -604,7 +602,6 @@ export default function ClassCoursesPage() {
                 <SelectInput
                   name="teacher_id"
                   placeholder="Select a teacher..."
-                  required
                   options={teachers.map((teacher) => ({
                     value: teacher.id,
                     label: `${teacher.first_name} ${teacher.last_name}`,

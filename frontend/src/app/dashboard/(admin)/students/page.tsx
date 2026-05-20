@@ -12,6 +12,8 @@ import SelectInput from "@/components/form/SelectInput";
 import { studentsApi, Student, CreateStudentDTO, UpdateStudentDTO } from "@/lib/api/students";
 import { classesApi, Class } from "@/lib/api/classes";
 import { useToast } from "@/components/ui/toast/ToastProvider";
+import { useResourceAccess, useCourseNoteAccess } from "@/hooks/usePermissions";
+import PermissionGate from "@/components/auth/PermissionGate";
 
 // Format date helper
 const formatDate = (dateString: string): string => {
@@ -33,7 +35,11 @@ export default function StudentsPage() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [nextStudentCode, setNextStudentCode] = useState<string>("");
+  const [isLoadingNextCode, setIsLoadingNextCode] = useState(false);
   const { showToast } = useToast();
+  const { canRead, canManage } = useResourceAccess("student");
+  const { canView: canViewGrades } = useCourseNoteAccess();
   const addModal = useModal();
   const editModal = useModal();
   const viewModal = useModal();
@@ -97,10 +103,24 @@ export default function StudentsPage() {
   };
 
   // Handle add student
-  const handleAddStudent = () => {
+  const handleAddStudent = async () => {
     setSelectedStudent(null);
     setIsEditMode(false);
+    setIsLoadingNextCode(true);
+    setNextStudentCode("");
     addModal.openModal();
+    try {
+      const code = await studentsApi.getNextCode();
+      setNextStudentCode(code);
+    } catch (err: unknown) {
+      console.error("Failed to load next student code:", err);
+      showToast({
+        type: "error",
+        message: "Could not load the next student code. It will still be assigned on save.",
+      });
+    } finally {
+      setIsLoadingNextCode(false);
+    }
   };
 
   // Handle edit student
@@ -147,28 +167,33 @@ export default function StudentsPage() {
         setIsSaving(true);
         setError(null);
 
-        // Format the payload according to API requirements
+        const email = ((formData.get("email") as string) || "").trim() || null;
+        const portalPassword = ((formData.get("password") as string) || "").trim();
+
         const basePayload: CreateStudentDTO = {
-          student_code: (formData.get("student_code") as string) || "",
           first_name: (formData.get("first_name") as string) || "",
           last_name: (formData.get("last_name") as string) || "",
-          email: (formData.get("email") as string) || null,
-          phone: (formData.get("phone") as string) || null,
+          email,
+          phone: ((formData.get("phone") as string) || "").trim() || null,
           date_of_birth: (formData.get("date_of_birth") as string) || "",
           gender: (formData.get("gender") as string) || "other",
-          address: (formData.get("address") as string) || null,
-          parent_name: (formData.get("parent_name") as string) || null,
-          parent_phone: (formData.get("parent_phone") as string) || null,
-          parent_email: (formData.get("parent_email") as string) || null,
+          address: ((formData.get("address") as string) || "").trim() || null,
+          parent_name: ((formData.get("parent_name") as string) || "").trim() || null,
+          parent_phone: ((formData.get("parent_phone") as string) || "").trim() || null,
+          parent_email: ((formData.get("parent_email") as string) || "").trim() || null,
           enrollment_date: (formData.get("enrollment_date") as string) || "",
           class_id: formData.get("class_id")
             ? parseInt(formData.get("class_id") as string, 10)
             : null,
         };
 
+        if (!isEditMode && portalPassword) {
+          basePayload.password = portalPassword;
+        }
+
         if (isEditMode && selectedStudent) {
-          // Update existing student
-          const updatePayload: UpdateStudentDTO = { ...basePayload };
+          const { password: _pw, ...updateFields } = basePayload;
+          const updatePayload: UpdateStudentDTO = updateFields;
           const updated = await studentsApi.update(selectedStudent.id, updatePayload);
 
           // Refetch students to ensure we have complete data
@@ -366,16 +391,11 @@ export default function StudentsPage() {
 
   // Action handlers
   const actions: ActionHandlers<Student> = {
-    onView: (student) => {
-      handleViewStudent(student);
-    },
-    onEdit: (student) => {
-      handleEditStudent(student);
-    },
-    onDelete: (student) => {
-      handleDeleteStudent(student);
-    },
-    onCopyId: (student) => {
+    onView: canRead ? (student) => handleViewStudent(student) : undefined,
+    onEdit: canManage ? (student) => handleEditStudent(student) : undefined,
+    onDelete: canManage ? (student) => handleDeleteStudent(student) : undefined,
+    onCopyId: canRead
+      ? (student) => {
       // Copy student code to clipboard
       navigator.clipboard.writeText(student.student_code);
       navigator.clipboard.writeText(student.student_code);
@@ -383,16 +403,28 @@ export default function StudentsPage() {
         type: "success",
         message: `Copied: ${student.student_code}`,
       });
-    },
-    customActions: [
-      {
-        label: "View Grades",
-        onClick: (student) => {
-          window.location.href = `/dashboard/students/${student.id}/grades`;
-        },
-      },
-    ],
+    }
+      : undefined,
+    customActions:
+      canRead && canViewGrades
+        ? [
+            {
+              label: "View Grades",
+              onClick: (student) => {
+                window.location.href = `/dashboard/students/${student.id}/grades`;
+              },
+            },
+          ]
+        : [],
   };
+
+  if (!canRead) {
+    return (
+      <p className="text-sm" style={{ color: "var(--theme-text-secondary)" }}>
+        You do not have permission to view students.
+      </p>
+    );
+  }
 
   return (
     <div className="space-y-6 w-full overflow-x-hidden">
@@ -406,9 +438,11 @@ export default function StudentsPage() {
             Manage and view all students in the system
           </p>
         </div>
-        <Button onClick={handleAddStudent} size="md" variant="primary">
-          Add Student
-        </Button>
+        <PermissionGate permissions={["student.manage"]}>
+          <Button onClick={handleAddStudent} size="md" variant="primary">
+            Add Student
+          </Button>
+        </PermissionGate>
       </div>
 
       {/* Students Table */}
@@ -442,7 +476,20 @@ export default function StudentsPage() {
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
               <div>
                 <Label htmlFor="student_code">Student Code</Label>
-                <Input type="text" name="student_code" placeholder="e.g. STU001" required />
+                <Input
+                  type="text"
+                  name="student_code_display"
+                  value={
+                    isLoadingNextCode
+                      ? "Generating…"
+                      : nextStudentCode || "Assigned on save"
+                  }
+                  disabled
+                  readOnly
+                />
+                <p className="mt-1 text-xs" style={{ color: "var(--theme-text-secondary)" }}>
+                  Auto-generated (STU000, STU001, …)
+                </p>
               </div>
               <div>
                 <Label htmlFor="class_id">Class</Label>
@@ -465,7 +512,19 @@ export default function StudentsPage() {
               </div>
               <div>
                 <Label>Email</Label>
-                <Input type="email" name="email" placeholder="Enter email address" />
+                <Input type="email" name="email" placeholder="Contact email (optional)" />
+              </div>
+              <div>
+                <Label>Portal password</Label>
+                <Input
+                  type="password"
+                  name="password"
+                  placeholder="Only if student will sign in"
+                  autoComplete="new-password"
+                />
+                <p className="mt-1 text-xs" style={{ color: "var(--theme-text-secondary)" }}>
+                  Optional. Leave blank for contact email only; fill with email to enable My Grades login.
+                </p>
               </div>
               <div>
                 <Label>Phone</Label>
@@ -540,11 +599,11 @@ export default function StudentsPage() {
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
               <div>
                 <Label htmlFor="student_code">Student Code</Label>
-                <Input 
-                  type="text" 
-                  name="student_code" 
-                  defaultValue={selectedStudent?.student_code || ""} 
-                  required 
+                <Input
+                  type="text"
+                  value={selectedStudent?.student_code || ""}
+                  disabled
+                  readOnly
                 />
               </div>
               <div>

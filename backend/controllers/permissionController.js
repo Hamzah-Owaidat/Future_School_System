@@ -105,24 +105,40 @@ exports.getPermissionById = asyncHandler(async (req, res, next) => {
  * @access  Private (Admin)
  */
 exports.createPermission = asyncHandler(async (req, res, next) => {
-  const { name, resource, action, description } = req.body;
+  const { code: codeRaw, name, resource, action, description } = req.body;
 
-  // Validate required fields
   if (!name || !resource || !action) {
     return sendErrorResponse(res, 400, 'Please provide name, resource, and action');
   }
 
-  // Check if permission name already exists
-  const existing = await query('SELECT id FROM permissions WHERE name = ?', [name]);
-  if (existing.length > 0) {
+  const code =
+    typeof codeRaw === 'string' && codeRaw.trim()
+      ? codeRaw.trim()
+      : `${String(resource).trim()}.${String(action).trim()}`;
+
+  const existingCode = await query('SELECT id FROM permissions WHERE code = ?', [code]);
+  if (existingCode.length > 0) {
+    return sendErrorResponse(res, 400, 'Permission code already exists');
+  }
+
+  const existingPair = await query(
+    'SELECT id FROM permissions WHERE resource = ? AND action = ?',
+    [resource, action]
+  );
+  if (existingPair.length > 0) {
+    return sendErrorResponse(res, 400, 'A permission for this resource/action already exists');
+  }
+
+  const existingName = await query('SELECT id FROM permissions WHERE name = ?', [name]);
+  if (existingName.length > 0) {
     return sendErrorResponse(res, 400, 'Permission name already exists');
   }
 
-  // Insert permission
   const result = await query(
-    `INSERT INTO permissions (name, resource, action, description, created_by, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO permissions (code, name, resource, action, description, created_by, updated_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
+      code,
       name,
       resource,
       action,
@@ -145,38 +161,58 @@ exports.createPermission = asyncHandler(async (req, res, next) => {
  */
 exports.updatePermission = asyncHandler(async (req, res, next) => {
   const { id } = req.params;
-  const { name, resource, action, description } = req.body;
+  const { code, name, resource, action, description } = req.body;
 
-  // Check if permission exists
-  const existing = await query('SELECT id FROM permissions WHERE id = ?', [id]);
-  if (existing.length === 0) {
+  const rows = await query('SELECT * FROM permissions WHERE id = ?', [id]);
+  if (rows.length === 0) {
     return sendErrorResponse(res, 404, 'Permission not found');
   }
 
-  // Check if permission name already exists (excluding current permission)
-  if (name) {
-    const duplicate = await query('SELECT id FROM permissions WHERE name = ? AND id != ?', [name, id]);
+  const cur = rows[0];
+
+  const nextResource = resource !== undefined ? resource : cur.resource;
+  const nextAction = action !== undefined ? action : cur.action;
+  const nextName = name !== undefined ? name : cur.name;
+  const nextDescription = description !== undefined ? description : cur.description;
+
+  if (nextName !== cur.name && nextName) {
+    const duplicate = await query('SELECT id FROM permissions WHERE name = ? AND id != ?', [
+      nextName,
+      id
+    ]);
     if (duplicate.length > 0) {
       return sendErrorResponse(res, 400, 'Permission name already exists');
     }
   }
 
-  // Build update query
-  const updates = [];
-  const params = [];
+  let nextCode;
+  if (code !== undefined && code !== null && String(code).trim()) {
+    nextCode = String(code).trim();
+  } else if (resource !== undefined || action !== undefined) {
+    nextCode = `${String(nextResource).trim()}.${String(nextAction).trim()}`;
+  } else {
+    nextCode = cur.code;
+  }
 
-  if (name) { updates.push('name = ?'); params.push(name); }
-  if (resource) { updates.push('resource = ?'); params.push(resource); }
-  if (action) { updates.push('action = ?'); params.push(action); }
-  if (description !== undefined) { updates.push('description = ?'); params.push(description); }
+  const dupCode = await query('SELECT id FROM permissions WHERE code = ? AND id != ?', [nextCode, id]);
+  if (dupCode.length > 0) {
+    return sendErrorResponse(res, 400, 'Permission code already exists');
+  }
 
-  updates.push('updated_by = ?');
-  params.push(req.employee.id);
-  params.push(id);
+  const dupPair = await query(
+    'SELECT id FROM permissions WHERE resource = ? AND action = ? AND id != ?',
+    [nextResource, nextAction, id]
+  );
+  if (dupPair.length > 0) {
+    return sendErrorResponse(res, 400, 'Another permission already uses this resource/action pair');
+  }
 
-  await query(`UPDATE permissions SET ${updates.join(', ')} WHERE id = ?`, params);
+  await query(
+    `UPDATE permissions SET code = ?, name = ?, resource = ?, action = ?, description = ?, updated_by = ?
+     WHERE id = ?`,
+    [nextCode, nextName, nextResource, nextAction, nextDescription, req.employee.id, id]
+  );
 
-  // Get updated permission
   const permissions = await query('SELECT * FROM permissions WHERE id = ?', [id]);
 
   sendSuccessResponse(res, 200, { permission: permissions[0] }, 'Permission updated successfully');

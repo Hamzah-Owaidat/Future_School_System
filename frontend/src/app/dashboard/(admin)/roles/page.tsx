@@ -12,6 +12,8 @@ import Label from "@/components/form/Label";
 import { rolesApi, Role, Permission } from "@/lib/api/roles";
 import { permissionsApi, GroupedPermissions } from "@/lib/api/permissions";
 import { useToast } from "@/components/ui/toast/ToastProvider";
+import { useResourceAccess } from "@/hooks/usePermissions";
+import PermissionGate from "@/components/auth/PermissionGate";
 
 interface RoleWithCounts extends Role {
   employee_count?: number;
@@ -31,6 +33,7 @@ export default function RolesPage() {
   const [roleActive, setRoleActive] = useState<boolean>(true);
 
   const { showToast } = useToast();
+  const { canRead, canManage } = useResourceAccess("role");
   const addEditModal = useModal();
   const viewModal = useModal();
 
@@ -273,43 +276,49 @@ export default function RolesPage() {
 
   // Action handlers
   const actions: ActionHandlers<RoleWithCounts> = {
-    onView: (role) => {
-      handleViewRole(role);
-    },
-    onEdit: (role) => {
-      handleEditRole(role);
-    },
-    onDelete: (role) => {
-      handleDeleteRole(role);
-    },
-    onCopyId: (role) => {
-      // Copy role ID to clipboard
-      navigator.clipboard.writeText(role.id.toString());
-      navigator.clipboard.writeText(String(role.id));
-      showToast({
-        type: "success",
-        message: `Copied ID: ${role.id}`,
-      });
-    },
-    // Example of custom actions - each page can add their own
-    customActions: [
-      {
-        label: "Assign Permissions",
-        onClick: (role) => {
-          // Open the role edit modal focused on permissions
+    onView: canRead
+      ? (role) => {
+          handleViewRole(role);
+        }
+      : undefined,
+    onEdit: canManage
+      ? (role) => {
           handleEditRole(role);
-        },
-      },
-      {
-        label: "View Employees",
-        onClick: (role) => {
+        }
+      : undefined,
+    onDelete: canManage
+      ? (role) => {
+          handleDeleteRole(role);
+        }
+      : undefined,
+    onCopyId: canRead
+      ? (role) => {
+          navigator.clipboard.writeText(String(role.id));
           showToast({
-            type: "info",
-            message: `Viewing ${role.employee_count} employee(s) with role: ${role.name}`,
+            type: "success",
+            message: `Copied ID: ${role.id}`,
           });
-        },
-      },
-    ],
+        }
+      : undefined,
+    customActions: canManage
+      ? [
+          {
+            label: "Assign Permissions",
+            onClick: (role) => {
+              handleEditRole(role);
+            },
+          },
+          {
+            label: "View Employees",
+            onClick: (role) => {
+              showToast({
+                type: "info",
+                message: `Viewing ${role.employee_count} employee(s) with role: ${role.name}`,
+              });
+            },
+          },
+        ]
+      : [],
   };
 
   return (
@@ -324,9 +333,11 @@ export default function RolesPage() {
             Manage and view all roles in the system
           </p>
         </div>
-        <Button onClick={handleAddRole} size="md" variant="primary">
-          Add Role
-        </Button>
+        <PermissionGate permissions={["role.manage"]}>
+          <Button onClick={handleAddRole} size="md" variant="primary">
+            Add Role
+          </Button>
+        </PermissionGate>
       </div>
 
       {error && (

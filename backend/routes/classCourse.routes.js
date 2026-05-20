@@ -1,20 +1,22 @@
 const express = require('express');
 const router = express.Router();
 const classCourseController = require('../controllers/classCourseController');
-const { protect, authorize } = require('../middleware/auth');
+const { protectEmployee, requirePermission } = require('../middleware/auth');
 
-// All routes require authentication
-router.use(protect);
+router.use(protectEmployee);
 
-// Get assignments - accessible to admins, principals, teachers
-router.get('/', classCourseController.getClassCourses);
-router.get('/:id', classCourseController.getClassCourseById);
-
-// Admin-only modifications
-router.post('/', authorize('admin'), classCourseController.createClassCourse);
-router.put('/:id', authorize('admin'), classCourseController.updateClassCourse);
-router.delete('/:id', authorize('admin'), classCourseController.deleteClassCourse);
+router.get(
+  '/',
+  requirePermission('course.read', 'course.manage', 'class.read', 'class.manage'),
+  classCourseController.getClassCourses
+);
+router.get(
+  '/:id',
+  requirePermission('course.read', 'course.manage', 'class.read', 'class.manage'),
+  classCourseController.getClassCourseById
+);
+router.post('/', requirePermission('course.manage'), classCourseController.createClassCourse);
+router.put('/:id', requirePermission('course.manage'), classCourseController.updateClassCourse);
+router.delete('/:id', requirePermission('course.manage'), classCourseController.deleteClassCourse);
 
 module.exports = router;
-
-

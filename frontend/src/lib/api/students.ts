@@ -53,10 +53,13 @@ export interface GetStudentsParams {
 }
 
 export interface CreateStudentDTO {
-  student_code: string;
+  /** Omitted — server auto-generates STU000, STU001, … */
+  student_code?: string;
   first_name: string;
   last_name: string;
   email?: string | null;
+  /** Optional — with email, creates student portal login */
+  password?: string | null;
   phone?: string | null;
   date_of_birth: string;
   gender?: string;
@@ -106,6 +109,18 @@ export const studentsApi = {
 
     console.warn("Unexpected students response shape:", payload);
     return [];
+  },
+
+  getNextCode: async (): Promise<string> => {
+    const response = await api.get("/students/next-code");
+    const payload: any = response.data;
+    if (payload?.data?.student_code) {
+      return payload.data.student_code as string;
+    }
+    if (typeof payload?.student_code === "string") {
+      return payload.student_code;
+    }
+    throw new Error("Could not load next student code");
   },
 
   // Get student by ID

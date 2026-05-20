@@ -1,11 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const permissionController = require('../controllers/permissionController');
-const { protect, authorize } = require('../middleware/auth');
+const { protectEmployee, requirePermission } = require('../middleware/auth');
 
-// All routes require authentication and admin role
-router.use(protect);
-router.use(authorize('admin'));
+router.use(protectEmployee);
+router.use(requirePermission('permission.manage'));
 
 router.get('/', permissionController.getAllPermissions);
 router.get('/grouped', permissionController.getGroupedPermissions);
@@ -15,4 +14,3 @@ router.put('/:id', permissionController.updatePermission);
 router.delete('/:id', permissionController.deletePermission);
 
 module.exports = router;
-

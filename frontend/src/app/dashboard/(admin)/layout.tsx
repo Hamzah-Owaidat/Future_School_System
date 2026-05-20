@@ -4,9 +4,14 @@ import { useSidebar } from "@/context/SidebarContext";
 import AppHeader from "@/layout/AppHeader";
 import AppSidebar from "@/layout/AppSidebar";
 import Backdrop from "@/layout/Backdrop";
+import DashboardRouteGuard from "@/components/auth/DashboardRouteGuard";
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api/axios";
+import {
+  useAuth,
+  buildSessionFromMePayload,
+} from "@/context/AuthContext";
 
 export default function AdminLayout({
   children,
@@ -15,33 +20,41 @@ export default function AdminLayout({
 }) {
   const { isExpanded, isHovered, isMobileOpen } = useSidebar();
   const router = useRouter();
+  const { setSession, isReady } = useAuth();
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
 
   useEffect(() => {
     const checkAuth = async () => {
       try {
-        // Basic client-side check for token
-        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+        const token =
+          typeof window !== "undefined" ? localStorage.getItem("token") : null;
 
         if (!token) {
           router.replace("/auth/signin");
           return;
         }
 
-        // Optionally validate token and refresh user via /auth/me
         try {
           const response = await api.get("/auth/me");
-          const payload: any = response.data;
-          const data = payload?.data ?? payload;
+          const payload: Record<string, unknown> = response.data as Record<string, unknown>;
+          const data = (payload?.data ?? payload) as Record<string, unknown>;
 
-          if (typeof window !== "undefined" && data?.employee) {
-            localStorage.setItem("user", JSON.stringify(data.employee));
+          const session = buildSessionFromMePayload({
+            account_type: data.account_type as string | undefined,
+            employee: data.employee as never,
+            student: data.student as never,
+            permissions: (data.permissions as string[]) ?? [],
+          });
+
+          if (session) {
+            setSession(session);
           }
-        } catch (err) {
-          // If /auth/me fails, clear auth and redirect to signin
+        } catch {
           if (typeof window !== "undefined") {
             localStorage.removeItem("token");
+            localStorage.removeItem("auth_session");
             localStorage.removeItem("user");
+            localStorage.removeItem("permissions");
           }
           router.replace("/auth/signin");
           return;
@@ -52,10 +65,9 @@ export default function AdminLayout({
     };
 
     void checkAuth();
-  }, [router]);
+  }, [router, setSession]);
 
-  // While checking auth, show a minimal loading state
-  if (isCheckingAuth) {
+  if (isCheckingAuth || !isReady) {
     return (
       <div
         className="min-h-screen flex items-center justify-center"
@@ -71,31 +83,26 @@ export default function AdminLayout({
     );
   }
 
-  // Dynamic class for main content margin based on sidebar state
   const mainContentMargin = isMobileOpen
     ? "ml-0"
     : isExpanded || isHovered
-    ? "lg:ml-[290px]"
-    : "lg:ml-[90px]";
+      ? "lg:ml-[290px]"
+      : "lg:ml-[90px]";
 
   return (
     <div
       className="min-h-screen xl:flex overflow-x-hidden"
       style={{ backgroundColor: "var(--theme-background-secondary)" }}
     >
-      {/* Sidebar and Backdrop */}
       <AppSidebar />
       <Backdrop />
-      {/* Main Content Area */}
       <div
         className={`flex-1 transition-all duration-300 ease-in-out overflow-x-hidden ${mainContentMargin}`}
         style={{ backgroundColor: "var(--theme-background-secondary)" }}
       >
-        {/* Header */}
         <AppHeader />
-        {/* Page Content */}
         <main className="p-4 mx-auto max-w-(--breakpoint-2xl) md:p-6 w-full overflow-x-hidden">
-          {children}
+          <DashboardRouteGuard>{children}</DashboardRouteGuard>
         </main>
       </div>
     </div>

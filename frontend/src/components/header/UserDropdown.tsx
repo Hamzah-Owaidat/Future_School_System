@@ -9,7 +9,7 @@ import { useAuth } from "@/context/AuthContext";
 export default function UserDropdown() {
   const [isOpen, setIsOpen] = useState(false);
   const router = useRouter();
-  const { user, setUser } = useAuth();
+  const { session, user, clearSession } = useAuth();
 
   function toggleDropdown(e: React.MouseEvent<HTMLButtonElement, MouseEvent>) {
     e.stopPropagation();
@@ -21,23 +21,18 @@ export default function UserDropdown() {
   }
 
   function handleSignOut() {
-    // Clear auth data (adjust keys as needed)
-    if (typeof window !== "undefined") {
-      localStorage.removeItem("token");
-      localStorage.removeItem("user");
-    }
-
-    setUser(null);
+    clearSession();
     closeDropdown();
     router.push("/auth/signin");
   }
 
+  const profile = session?.employee ?? session?.student ?? user;
   const displayName =
-    (user?.first_name || user?.last_name) ?
-      `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim() :
-      user?.email ?? "User";
+    profile?.first_name || profile?.last_name
+      ? `${profile?.first_name ?? ""} ${profile?.last_name ?? ""}`.trim()
+      : profile?.email ?? "User";
 
-  const displayEmail = user?.email ?? "No email";
+  const displayEmail = profile?.email ?? "No email";
 
   return (
     <div className="relative">

@@ -9,6 +9,8 @@ import TextArea from "@/components/form/input/TextArea";
 import { Modal } from "@/components/ui/modal";
 import { useToast } from "@/components/ui/toast/ToastProvider";
 import { ToggleSwitch } from "@/components/ui/toggle/ToggleSwitch";
+import { useResourceAccess } from "@/hooks/usePermissions";
+import PermissionGate from "@/components/auth/PermissionGate";
 
 type CourseFormState = {
   name: string;
@@ -25,6 +27,7 @@ const initialFormState: CourseFormState = {
 };
 
 export default function CoursesPage() {
+  const { canRead, canManage } = useResourceAccess("course");
   const [courses, setCourses] = useState<Course[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -238,12 +241,18 @@ export default function CoursesPage() {
 
   const actions: ActionHandlers<Course> = useMemo(
     () => ({
-      onView: openViewModal,
-      onEdit: openEditModal,
-      onDelete: handleDelete,
+      onView: canRead ? openViewModal : undefined,
+      onEdit: canManage ? openEditModal : undefined,
+      onDelete: canManage ? handleDelete : undefined,
     }),
-    []
+    [canRead, canManage]
   );
+
+  if (!canRead) {
+    return (
+      <p className="text-sm text-gray-500">You do not have permission to view courses.</p>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -254,9 +263,11 @@ export default function CoursesPage() {
             Manage the list of courses offered at FuturSchool.
           </p>
         </div>
-        <Button type="button" onClick={openAddModal} size="sm">
-          Add Course
-        </Button>
+        <PermissionGate permissions={["course.manage"]}>
+          <Button type="button" onClick={openAddModal} size="sm">
+            Add Course
+          </Button>
+        </PermissionGate>
       </div>
 
       <ReusableTable

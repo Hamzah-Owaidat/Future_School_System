@@ -11,6 +11,8 @@ import Label from "@/components/form/Label";
 import SelectInput from "@/components/form/SelectInput";
 import { permissionsApi, Permission, CreatePermissionDTO, UpdatePermissionDTO } from "@/lib/api/permissions";
 import { useToast } from "@/components/ui/toast/ToastProvider";
+import { useResourceAccess } from "@/hooks/usePermissions";
+import PermissionGate from "@/components/auth/PermissionGate";
 
 export default function PermissionsPage() {
   const [permissions, setPermissions] = useState<Permission[]>([]);
@@ -22,6 +24,7 @@ export default function PermissionsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const { showToast } = useToast();
+  const { canRead, canManage } = useResourceAccess("permission");
   const addEditModal = useModal();
   const viewModal = useModal();
 
@@ -243,45 +246,52 @@ export default function PermissionsPage() {
 
   // Action handlers
   const actions: ActionHandlers<Permission> = {
-    onView: (permission) => {
-      handleViewPermission(permission);
-    },
-    onEdit: (permission) => {
-      handleEditPermission(permission);
-    },
-    onDelete: (permission) => {
-      handleDeletePermission(permission);
-    },
-    onCopyId: (permission) => {
-      // Copy permission ID to clipboard
-      navigator.clipboard.writeText(permission.id.toString());
-      navigator.clipboard.writeText(String(permission.id));
-      showToast({
-        type: "success",
-        message: `Copied ID: ${permission.id}`,
-      });
-    },
-    // Example of custom actions - each page can add their own
-    customActions: [
-      {
-        label: "View Roles",
-        onClick: (permission) => {
+    onView: canRead
+      ? (permission) => {
+          handleViewPermission(permission);
+        }
+      : undefined,
+    onEdit: canManage
+      ? (permission) => {
+          handleEditPermission(permission);
+        }
+      : undefined,
+    onDelete: canManage
+      ? (permission) => {
+          handleDeletePermission(permission);
+        }
+      : undefined,
+    onCopyId: canRead
+      ? (permission) => {
+          navigator.clipboard.writeText(String(permission.id));
           showToast({
-            type: "info",
-            message: `Viewing ${permission.role_count} role(s) with permission: ${permission.name}`,
+            type: "success",
+            message: `Copied ID: ${permission.id}`,
           });
-        },
-      },
-      {
-        label: "Manage Access",
-        onClick: (permission) => {
-          showToast({
-            type: "info",
-            message: `Managing access for: ${permission.name}`,
-          });
-        },
-      },
-    ],
+        }
+      : undefined,
+    customActions: canManage
+      ? [
+          {
+            label: "View Roles",
+            onClick: (permission) => {
+              showToast({
+                type: "info",
+                message: `Viewing ${permission.role_count} role(s) with permission: ${permission.name}`,
+              });
+            },
+          },
+          {
+            label: "Manage Access",
+            onClick: (permission) => {
+              showToast({
+                type: "info",
+                message: `Managing access for: ${permission.name}`,
+              });
+            },
+          },
+        ]
+      : [],
   };
 
   return (
@@ -296,9 +306,11 @@ export default function PermissionsPage() {
             Manage and view all permissions in the system
           </p>
         </div>
-        <Button onClick={handleAddPermission} size="md" variant="primary">
-          Add Permission
-        </Button>
+        <PermissionGate permissions={["permission.manage"]}>
+          <Button onClick={handleAddPermission} size="md" variant="primary">
+            Add Permission
+          </Button>
+        </PermissionGate>
       </div>
 
       {error && (

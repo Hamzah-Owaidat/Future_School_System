@@ -15,7 +15,8 @@ import {
   type UpsertCourseNoteDTO,
 } from "@/lib/api/courseNotes";
 import { useToast } from "@/components/ui/toast/ToastProvider";
-import { useAuth } from "@/context/AuthContext";
+import { useCourseNoteAccess } from "@/hooks/usePermissions";
+import PermissionGate from "@/components/auth/PermissionGate";
 
 type Semester = 1 | 2 | 3;
 
@@ -44,10 +45,10 @@ export default function GradesPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
-  const { user } = useAuth();
   const { showToast } = useToast();
-
-  const isTeacher = user?.role_name?.toLowerCase() === "teacher";
+  const { canWrite, isScopedWriter, employeeId } = useCourseNoteAccess();
+  const gradeInputClass =
+    "w-full max-w-[90px] rounded border border-gray-200 px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-900/60 disabled:cursor-not-allowed disabled:opacity-60";
 
   // Load reference data, limiting options for teachers based on assignments
   useEffect(() => {
@@ -55,9 +56,8 @@ export default function GradesPage() {
       try {
         setIsLoading(true);
 
-        if (isTeacher && user?.id) {
-          // Teachers: only classes/courses they are assigned to
-          const assignments = await classCoursesApi.getAll({ teacher_id: user.id });
+        if (isScopedWriter && employeeId) {
+          const assignments = await classCoursesApi.getAll({ teacher_id: employeeId });
 
           const uniqueClassIds = Array.from(
             new Set(assignments.map((a) => a.class_id))
@@ -94,7 +94,7 @@ export default function GradesPage() {
     };
 
     void loadData();
-  }, [isTeacher, user]);
+  }, [isScopedWriter, employeeId, showToast]);
 
   const canLoadGrades = useMemo(
     () => !!selectedClassId && !!selectedCourseId && !!academicYear && !!semester,
@@ -237,10 +237,10 @@ export default function GradesPage() {
 
   const handleSaveAll = async () => {
     if (!canLoadGrades || gradeRows.length === 0) return;
-    if (!user?.id) {
+    if (!canWrite) {
       showToast({
         type: "error",
-        message: "Missing current user information.",
+        message: "You do not have permission to save grades.",
       });
       return;
     }
@@ -334,14 +334,16 @@ export default function GradesPage() {
             Enter and manage grades by class, course, academic year, and semester.
           </p>
         </div>
-        <Button
-          type="button"
-          size="sm"
-          onClick={handleSaveAll}
-          disabled={!canLoadGrades || gradeRows.length === 0 || isSaving}
-        >
-          {isSaving ? "Saving..." : "Save All"}
-        </Button>
+        <PermissionGate permissions={["course_note.write", "course_note.manage"]}>
+          <Button
+            type="button"
+            size="sm"
+            onClick={handleSaveAll}
+            disabled={!canLoadGrades || gradeRows.length === 0 || isSaving}
+          >
+            {isSaving ? "Saving..." : "Save All"}
+          </Button>
+        </PermissionGate>
       </div>
 
       {/* Filters */}
@@ -471,8 +473,10 @@ export default function GradesPage() {
                   <td className="px-2 py-1 text-center">
                     <input
                       type="number"
-                      className="w-full max-w-[90px] rounded border border-gray-200 px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-900/60"
+                      className={gradeInputClass}
                       value={row.partial1_score}
+                      readOnly={!canWrite}
+                      disabled={!canWrite}
                       onChange={(e) =>
                         handleCellChange(row.student.id, "partial1_score", e.target.value)
                       }
@@ -481,8 +485,10 @@ export default function GradesPage() {
                   <td className="px-2 py-1 text-center">
                     <input
                       type="number"
-                      className="w-full max-w-[90px] rounded border border-gray-200 px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-900/60"
+                      className={gradeInputClass}
                       value={row.partial1_total}
+                      readOnly={!canWrite}
+                      disabled={!canWrite}
                       onChange={(e) =>
                         handleCellChange(row.student.id, "partial1_total", e.target.value)
                       }
@@ -491,8 +497,10 @@ export default function GradesPage() {
                   <td className="px-2 py-1 text-center">
                     <input
                       type="number"
-                      className="w-full max-w-[90px] rounded border border-gray-200 px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-900/60"
+                      className={gradeInputClass}
                       value={row.partial2_score}
+                      readOnly={!canWrite}
+                      disabled={!canWrite}
                       onChange={(e) =>
                         handleCellChange(row.student.id, "partial2_score", e.target.value)
                       }
@@ -501,8 +509,10 @@ export default function GradesPage() {
                   <td className="px-2 py-1 text-center">
                     <input
                       type="number"
-                      className="w-full max-w-[90px] rounded border border-gray-200 px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-900/60"
+                      className={gradeInputClass}
                       value={row.partial2_total}
+                      readOnly={!canWrite}
+                      disabled={!canWrite}
                       onChange={(e) =>
                         handleCellChange(row.student.id, "partial2_total", e.target.value)
                       }
@@ -511,8 +521,10 @@ export default function GradesPage() {
                   <td className="px-2 py-1 text-center">
                     <input
                       type="number"
-                      className="w-full max-w-[90px] rounded border border-gray-200 px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-900/60"
+                      className={gradeInputClass}
                       value={row.final_score}
+                      readOnly={!canWrite}
+                      disabled={!canWrite}
                       onChange={(e) =>
                         handleCellChange(row.student.id, "final_score", e.target.value)
                       }
@@ -521,8 +533,10 @@ export default function GradesPage() {
                   <td className="px-2 py-1 text-center">
                     <input
                       type="number"
-                      className="w-full max-w-[90px] rounded border border-gray-200 px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-900/60"
+                      className={gradeInputClass}
                       value={row.final_total}
+                      readOnly={!canWrite}
+                      disabled={!canWrite}
                       onChange={(e) =>
                         handleCellChange(row.student.id, "final_total", e.target.value)
                       }

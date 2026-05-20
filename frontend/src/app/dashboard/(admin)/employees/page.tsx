@@ -12,6 +12,8 @@ import SelectInput from "@/components/form/SelectInput";
 import { employeeApi, Employee, CreateEmployeeDTO } from "@/lib/api/employees";
 import { rolesApi, Role } from "@/lib/api/roles";
 import { useToast } from "@/components/ui/toast/ToastProvider";
+import { useResourceAccess } from "@/hooks/usePermissions";
+import PermissionGate from "@/components/auth/PermissionGate";
 
 // Format date helper
 const formatDate = (dateString: string): string => {
@@ -46,6 +48,7 @@ export default function EmployeesPage() {
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const { showToast } = useToast();
+  const { canRead, canManage } = useResourceAccess("employee");
   const addModal = useModal();
   const editModal = useModal();
   const viewModal = useModal();
@@ -489,13 +492,18 @@ export default function EmployeesPage() {
 
   // Action handlers
   const actions: ActionHandlers<Employee> = {
-    onView: (employee) => {
-      handleViewEmployee(employee);
-    },
-    onEdit: (employee) => {
-      handleEditEmployee(employee);
-    },
-    onDelete: (employee) => {
+    onView: canRead
+      ? (employee) => {
+          handleViewEmployee(employee);
+        }
+      : undefined,
+    onEdit: canManage
+      ? (employee) => {
+          handleEditEmployee(employee);
+        }
+      : undefined,
+    onDelete: canManage
+      ? (employee) => {
       if (
         confirm(
           `Are you sure you want to delete ${employee.first_name} ${employee.last_name}?`
@@ -541,8 +549,10 @@ export default function EmployeesPage() {
 
         void deleteEmployee();
       }
-    },
-    onCopyId: (employee) => {
+    }
+      : undefined,
+    onCopyId: canRead
+      ? (employee) => {
       // Copy employee code to clipboard
       navigator.clipboard.writeText(employee.employee_code);
       navigator.clipboard.writeText(employee.employee_code);
@@ -550,9 +560,10 @@ export default function EmployeesPage() {
         type: "success",
         message: `Copied: ${employee.employee_code}`,
       });
-    },
-    // Example of custom actions - each page can add their own
-    customActions: [
+    }
+      : undefined,
+    customActions: canRead
+      ? [
       {
         label: "Send Email",
         onClick: (employee) => {
@@ -571,8 +582,17 @@ export default function EmployeesPage() {
           });
         },
       },
-    ],
+    ]
+      : [],
   };
+
+  if (!canRead) {
+    return (
+      <p className="text-sm" style={{ color: "var(--theme-text-secondary)" }}>
+        You do not have permission to view employees.
+      </p>
+    );
+  }
 
   return (
     <div className="space-y-6 w-full overflow-x-hidden">
@@ -586,9 +606,11 @@ export default function EmployeesPage() {
             Manage and view all employees in the system
           </p>
         </div>
-        <Button onClick={handleAddEmployee} size="md" variant="primary">
-          Add Employee
-        </Button>
+        <PermissionGate permissions={["employee.manage"]}>
+          <Button onClick={handleAddEmployee} size="md" variant="primary">
+            Add Employee
+          </Button>
+        </PermissionGate>
       </div>
 
       {/* Employees Table */}

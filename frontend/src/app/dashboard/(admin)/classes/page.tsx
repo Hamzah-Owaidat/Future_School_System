@@ -10,6 +10,8 @@ import Input from "@/components/form/input/InputField";
 import Label from "@/components/form/Label";
 import { classesApi, Class, CreateClassDTO, UpdateClassDTO } from "@/lib/api/classes";
 import { useToast } from "@/components/ui/toast/ToastProvider";
+import { useResourceAccess } from "@/hooks/usePermissions";
+import PermissionGate from "@/components/auth/PermissionGate";
 
 // Format date helper
 const formatDate = (dateString: string): string => {
@@ -31,6 +33,7 @@ export default function ClassesPage() {
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const { showToast } = useToast();
+  const { canRead, canManage } = useResourceAccess("class");
   const addModal = useModal();
   const editModal = useModal();
   const viewModal = useModal();
@@ -282,13 +285,10 @@ export default function ClassesPage() {
 
   // Action handlers
   const actions: ActionHandlers<Class> = {
-    onView: (classItem) => {
-      handleViewClass(classItem);
-    },
-    onEdit: (classItem) => {
-      handleEditClass(classItem);
-    },
-    onDelete: (classItem) => {
+    onView: canRead ? (classItem) => handleViewClass(classItem) : undefined,
+    onEdit: canManage ? (classItem) => handleEditClass(classItem) : undefined,
+    onDelete: canManage
+      ? (classItem) => {
       if (
         confirm(
           `Are you sure you want to delete ${classItem.class_name}? This will deactivate the class.`
@@ -309,8 +309,10 @@ export default function ClassesPage() {
 
         void deleteClass();
       }
-    },
-    onCopyId: (classItem) => {
+    }
+      : undefined,
+    onCopyId: canRead
+      ? (classItem) => {
       // Copy class code to clipboard
       navigator.clipboard.writeText(classItem.class_code);
       navigator.clipboard.writeText(classItem.class_code);
@@ -318,9 +320,10 @@ export default function ClassesPage() {
         type: "success",
         message: `Copied: ${classItem.class_code}`,
       });
-    },
-    // Example of custom actions - each page can add their own
-    customActions: [
+    }
+      : undefined,
+    customActions: canRead
+      ? [
       {
         label: "View Students",
         onClick: (classItem) => {
@@ -339,12 +342,20 @@ export default function ClassesPage() {
           });
         },
       },
-    ],
+    ]
+      : [],
   };
+
+  if (!canRead) {
+    return (
+      <p className="text-sm" style={{ color: "var(--theme-text-secondary)" }}>
+        You do not have permission to view classes.
+      </p>
+    );
+  }
 
   return (
     <div className="space-y-6 w-full overflow-x-hidden">
-      {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold" style={{ color: "var(--theme-text-primary)" }}>
@@ -354,9 +365,11 @@ export default function ClassesPage() {
             Manage and view all classes in the system
           </p>
         </div>
-        <Button onClick={handleAddClass} size="md" variant="primary">
-          Add Class
-        </Button>
+        <PermissionGate permissions={["class.manage"]}>
+          <Button onClick={handleAddClass} size="md" variant="primary">
+            Add Class
+          </Button>
+        </PermissionGate>
       </div>
 
       {/* Error message */}
