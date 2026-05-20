@@ -1,14 +1,12 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import SelectInput from "@/components/form/SelectInput";
 import Input from "@/components/form/input/InputField";
 import Label from "@/components/form/Label";
 import Button from "@/components/ui/button/Button";
-import { classesApi, type Class } from "@/lib/api/classes";
-import { coursesApi, type Course } from "@/lib/api/courses";
 import { studentsApi, type Student } from "@/lib/api/students";
-import { classCoursesApi } from "@/lib/api/classCourses";
 import {
   courseNotesApi,
   type CourseNote,
@@ -16,7 +14,16 @@ import {
 } from "@/lib/api/courseNotes";
 import { useToast } from "@/components/ui/toast/ToastProvider";
 import { useCourseNoteAccess } from "@/hooks/usePermissions";
+import { useAuth } from "@/context/AuthContext";
 import PermissionGate from "@/components/auth/PermissionGate";
+import {
+  useClassesList,
+  useCoursesList,
+  useClassCoursesList,
+  useInvalidateCache,
+} from "@/lib/query/hooks";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { STALE } from "@/lib/query/cacheTimes";
 
 type Semester = 1 | 2 | 3;
 
@@ -33,11 +40,11 @@ type GradeRow = {
 };
 
 export default function GradesPage() {
-  const [classes, setClasses] = useState<Class[]>([]);
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [students, setStudents] = useState<Student[]>([]);
+  const queryClient = useQueryClient();
+  const invalidate = useInvalidateCache();
+  const { data: allClasses = [] } = useClassesList({ show_all: false });
+  const { data: allCourses = [] } = useCoursesList({ show_all: false });
   const [gradeRows, setGradeRows] = useState<GradeRow[]>([]);
-  const [gradeCache, setGradeCache] = useState<Record<string, GradeRow[]>>({});
   const [selectedClassId, setSelectedClassId] = useState<string>("");
   const [selectedCourseId, setSelectedCourseId] = useState<string>("");
   const [academicYear, setAcademicYear] = useState<string>("");
@@ -46,55 +53,31 @@ export default function GradesPage() {
   const [isSaving, setIsSaving] = useState(false);
 
   const { showToast } = useToast();
+  const { user, session } = useAuth();
+  const teacherId = session?.employee?.id ?? user?.id;
   const { canWrite, isScopedWriter, employeeId } = useCourseNoteAccess();
+  const { data: teacherAssignments = [] } = useClassCoursesList(
+    { teacher_id: employeeId!, show_all: false },
+    Boolean(isScopedWriter && employeeId)
+  );
   const gradeInputClass =
     "w-full max-w-[90px] rounded border border-gray-200 px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-900/60 disabled:cursor-not-allowed disabled:opacity-60";
 
-  // Load reference data, limiting options for teachers based on assignments
-  useEffect(() => {
-    const loadData = async () => {
-      try {
-        setIsLoading(true);
+  const classes = useMemo(() => {
+    if (isScopedWriter && employeeId && teacherAssignments.length > 0) {
+      const classIds = new Set(teacherAssignments.map((a) => a.class_id));
+      return allClasses.filter((cls) => classIds.has(cls.id));
+    }
+    return allClasses;
+  }, [allClasses, isScopedWriter, employeeId, teacherAssignments]);
 
-        if (isScopedWriter && employeeId) {
-          const assignments = await classCoursesApi.getAll({ teacher_id: employeeId });
-
-          const uniqueClassIds = Array.from(
-            new Set(assignments.map((a) => a.class_id))
-          );
-          const uniqueCourseIds = Array.from(
-            new Set(assignments.map((a) => a.course_id))
-          );
-
-          const [allClasses, allCourses] = await Promise.all([
-            classesApi.getAll({ show_all: false }),
-            coursesApi.getAll({ show_all: false }),
-          ]);
-
-          setClasses(allClasses.filter((cls) => uniqueClassIds.includes(cls.id)));
-          setCourses(allCourses.filter((course) => uniqueCourseIds.includes(course.id)));
-        } else {
-          // Admin / principal: all classes and courses
-          const [allClasses, allCourses] = await Promise.all([
-            classesApi.getAll({ show_all: false }),
-            coursesApi.getAll({ show_all: false }),
-          ]);
-          setClasses(allClasses);
-          setCourses(allCourses);
-        }
-      } catch (error) {
-        console.error("Failed to load classes or courses", error);
-        showToast({
-          type: "error",
-          message: "Failed to load classes or courses.",
-        });
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    void loadData();
-  }, [isScopedWriter, employeeId, showToast]);
+  const courses = useMemo(() => {
+    if (isScopedWriter && employeeId && teacherAssignments.length > 0) {
+      const courseIds = new Set(teacherAssignments.map((a) => a.course_id));
+      return allCourses.filter((course) => courseIds.has(course.id));
+    }
+    return allCourses;
+  }, [allCourses, isScopedWriter, employeeId, teacherAssignments]);
 
   const canLoadGrades = useMemo(
     () => !!selectedClassId && !!selectedCourseId && !!academicYear && !!semester,
@@ -142,31 +125,41 @@ export default function GradesPage() {
 
   const loadGrades = async () => {
     if (!canLoadGrades || !currentKey) return;
-    
-    // Check cache first - if we have cached data, restore it without making a request
-    const cached = gradeCache[currentKey];
-    if (cached && cached.length > 0) {
-      setGradeRows(cached);
+
+    const cachedRows = queryClient.getQueryData<GradeRow[]>([
+      "grades-grid",
+      currentKey,
+    ]);
+    if (cachedRows?.length) {
+      setGradeRows(cachedRows);
       return;
     }
 
-    // No cache - fetch from backend
     try {
       setIsLoading(true);
       const classId = parseInt(selectedClassId, 10);
       const courseId = parseInt(selectedCourseId, 10);
 
+      const studentsParams = { class_id: classId, is_active: true };
+      const notesParams = {
+        class_id: classId,
+        course_id: courseId,
+        academic_year: academicYear,
+        semester: semester ?? undefined,
+      };
+
       const [studentsData, notesData] = await Promise.all([
-        studentsApi.getAll({ class_id: classId, is_active: true }),
-        courseNotesApi.getAll({
-          class_id: classId,
-          course_id: courseId,
-          academic_year: academicYear,
-          semester: semester ?? undefined,
+        queryClient.fetchQuery({
+          queryKey: queryKeys.students.list(studentsParams),
+          queryFn: () => studentsApi.getAll(studentsParams),
+          staleTime: STALE.GRADES,
+        }),
+        queryClient.fetchQuery({
+          queryKey: queryKeys.courseNotes.list(notesParams),
+          queryFn: () => courseNotesApi.getAll(notesParams),
+          staleTime: STALE.GRADES,
         }),
       ]);
-
-      setStudents(studentsData);
 
       const rows: GradeRow[] = studentsData.map((student) => {
         const existing = notesData.find(
@@ -198,6 +191,7 @@ export default function GradesPage() {
       });
 
       setGradeRows(rows);
+      queryClient.setQueryData(["grades-grid", currentKey], rows);
     } catch (error) {
       console.error("Failed to load grades", error);
       showToast({
@@ -219,28 +213,19 @@ export default function GradesPage() {
     // Don't auto-load - wait for user to click Load button
   }, [canLoadGrades]);
 
-  // Cache the current rows for the active filter combination so if the user
-  // switches filters away and back, their data is still shown.
-  useEffect(() => {
-    if (!canLoadGrades || !currentKey) return;
-    if (gradeRows.length === 0) return;
-
-    setGradeCache((prev) => {
-      // Avoid unnecessary state updates if the reference is the same
-      if (prev[currentKey] === gradeRows) return prev;
-      return {
-        ...prev,
-        [currentKey]: gradeRows,
-      };
-    });
-  }, [gradeRows, canLoadGrades, currentKey]);
-
   const handleSaveAll = async () => {
     if (!canLoadGrades || gradeRows.length === 0) return;
     if (!canWrite) {
       showToast({
         type: "error",
         message: "You do not have permission to save grades.",
+      });
+      return;
+    }
+    if (!teacherId) {
+      showToast({
+        type: "error",
+        message: "Missing teacher profile for saving grades.",
       });
       return;
     }
@@ -280,7 +265,7 @@ export default function GradesPage() {
             student_id: row.student.id,
             class_id: classId,
             course_id: courseId,
-            teacher_id: user.id,
+            teacher_id: teacherId!,
             academic_year: academicYear,
             semester: semester as number,
             partial1_score: p1Score,
@@ -307,6 +292,10 @@ export default function GradesPage() {
       }
 
       await Promise.all(payloads.map((dto) => courseNotesApi.upsert(dto)));
+      await invalidate.courseNotes();
+      if (currentKey) {
+        queryClient.removeQueries({ queryKey: ["grades-grid", currentKey] });
+      }
 
       showToast({
         type: "success",

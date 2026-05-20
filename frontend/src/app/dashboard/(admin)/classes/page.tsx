@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ReusableTable, Column, ActionHandlers } from "@/components/tables/ReusableTable";
 import { ToggleSwitch } from "@/components/ui/toggle/ToggleSwitch";
 import { Modal } from "@/components/ui/modal";
@@ -12,6 +13,9 @@ import { classesApi, Class, CreateClassDTO, UpdateClassDTO } from "@/lib/api/cla
 import { useToast } from "@/components/ui/toast/ToastProvider";
 import { useResourceAccess } from "@/hooks/usePermissions";
 import PermissionGate from "@/components/auth/PermissionGate";
+import { useClassesList, useInvalidateCache } from "@/lib/query/hooks";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { STALE } from "@/lib/query/cacheTimes";
 
 // Format date helper
 const formatDate = (dateString: string): string => {
@@ -24,47 +28,36 @@ const formatDate = (dateString: string): string => {
   });
 };
 
+const CLASSES_LIST_PARAMS = { show_all: false } as const;
+
 export default function ClassesPage() {
-  const [classes, setClasses] = useState<Class[]>([]);
+  const queryClient = useQueryClient();
+  const invalidate = useInvalidateCache();
+  const {
+    data: classes = [],
+    isLoading,
+    error: loadError,
+  } = useClassesList(CLASSES_LIST_PARAMS);
   const [selectedClass, setSelectedClass] = useState<Class | null>(null);
   const [viewClass, setViewClass] = useState<Class | null>(null);
   const [isEditMode, setIsEditMode] = useState(false);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const { showToast } = useToast();
+  const listKey = queryKeys.classes.list(CLASSES_LIST_PARAMS);
+  const displayError =
+    error || (loadError instanceof Error ? loadError.message : loadError ? String(loadError) : null);
   const { canRead, canManage } = useResourceAccess("class");
   const addModal = useModal();
   const editModal = useModal();
   const viewModal = useModal();
 
-  // Fetch classes from API
-  useEffect(() => {
-    const fetchClasses = async () => {
-      try {
-        setIsLoading(true);
-        setError(null);
-        const data = await classesApi.getAll({ show_all: false });
-        setClasses(data);
-      } catch (err: any) {
-        console.error("Failed to fetch classes:", err);
-        setError(err?.message || "Failed to load classes");
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchClasses();
-  }, []);
-
-  const refetchClasses = async () => {
-    const data = await classesApi.getAll({ show_all: false });
-    setClasses(data);
+  const patchClassesCache = (updater: (list: Class[]) => Class[]) => {
+    queryClient.setQueryData<Class[]>(listKey, (old) => updater(old ?? []));
   };
 
-  // Handle toggle active status
   const handleToggleActive = (classId: number, newStatus: boolean) => {
-    setClasses((prev) =>
+    patchClassesCache((prev) =>
       prev.map((cls) =>
         cls.id === classId ? { ...cls, is_active: newStatus ? 1 : 0 } : cls
       )
@@ -72,9 +65,10 @@ export default function ClassesPage() {
 
     classesApi
       .updateStatus(classId, newStatus)
+      .then(() => invalidate.classes())
       .catch((err: any) => {
         console.error("Failed to update class status:", err);
-        setClasses((prev) =>
+        patchClassesCache((prev) =>
           prev.map((cls) =>
             cls.id === classId ? { ...cls, is_active: newStatus ? 0 : 1 } : cls
           )
@@ -97,7 +91,11 @@ export default function ClassesPage() {
   const handleEditClass = async (classItem: Class) => {
     try {
       setIsEditMode(true);
-      const details = await classesApi.getById(classItem.id);
+      const details = await queryClient.fetchQuery({
+        queryKey: queryKeys.classes.detail(classItem.id),
+        queryFn: () => classesApi.getById(classItem.id),
+        staleTime: STALE.DETAIL,
+      });
       setSelectedClass(details);
       editModal.openModal();
     } catch (err: any) {
@@ -112,7 +110,11 @@ export default function ClassesPage() {
   // Handle view class
   const handleViewClass = async (classItem: Class) => {
     try {
-      const details = await classesApi.getById(classItem.id);
+      const details = await queryClient.fetchQuery({
+        queryKey: queryKeys.classes.detail(classItem.id),
+        queryFn: () => classesApi.getById(classItem.id),
+        staleTime: STALE.DETAIL,
+      });
       setViewClass(details);
       viewModal.openModal();
     } catch (err: any) {
@@ -154,14 +156,14 @@ export default function ClassesPage() {
           };
 
           await classesApi.update(selectedClass.id, updatePayload);
-          await refetchClasses();
+          await invalidate.classes();
 
           editModal.closeModal();
           setSelectedClass(null);
           setIsEditMode(false);
         } else {
           await classesApi.create(basePayload);
-          await refetchClasses();
+          await invalidate.classes();
 
           addModal.closeModal();
           form.reset();
@@ -297,7 +299,7 @@ export default function ClassesPage() {
         const deleteClass = async () => {
           try {
             await classesApi.delete(classItem.id);
-            setClasses((prev) => prev.filter((cls) => cls.id !== classItem.id));
+            await invalidate.classes();
           } catch (err: any) {
             console.error("Failed to delete class:", err);
             showToast({
@@ -373,9 +375,9 @@ export default function ClassesPage() {
       </div>
 
       {/* Error message */}
-      {error && (
+      {displayError && (
         <p className="text-sm" style={{ color: "var(--theme-text-error, #f04438)" }}>
-          {error}
+          {displayError}
         </p>
       )}
 
@@ -401,31 +403,31 @@ export default function ClassesPage() {
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
               <div>
                 <Label>Class Name</Label>
-                <Input type="text" name="class_name" placeholder="Enter class name" required />
+                <Input type="text" name="class_name" placeholder="Enter class name" />
               </div>
               <div>
                 <Label>Class Code</Label>
-                <Input type="text" name="class_code" placeholder="Enter class code" required />
+                <Input type="text" name="class_code" placeholder="Enter class code" />
               </div>
               <div>
                 <Label>Grade Level</Label>
-                <Input type="number" name="grade_level" placeholder="Enter grade level" min="1" required />
+                <Input type="number" name="grade_level" placeholder="Enter grade level" min="1" />
               </div>
               <div>
                 <Label>Section</Label>
-                <Input type="text" name="section" placeholder="Enter section" required />
+                <Input type="text" name="section" placeholder="Enter section" />
               </div>
               <div>
                 <Label>Capacity</Label>
-                <Input type="number" name="capacity" placeholder="Enter capacity" min="1" required />
+                <Input type="number" name="capacity" placeholder="Enter capacity" min="1" />
               </div>
               <div>
                 <Label>Room Number</Label>
-                <Input type="text" name="room_number" placeholder="Enter room number" required />
+                <Input type="text" name="room_number" placeholder="Enter room number" />
               </div>
               <div>
                 <Label>Academic Year</Label>
-                <Input type="text" name="academic_year" placeholder="e.g., 2024-2025" required />
+                <Input type="text" name="academic_year" placeholder="e.g., 2024-2025" />
               </div>
             </div>
             <div className="flex justify-end gap-3 pt-4">
@@ -463,7 +465,6 @@ export default function ClassesPage() {
                   type="text" 
                   name="class_name" 
                   defaultValue={selectedClass?.class_name || ""} 
-                  required 
                 />
               </div>
               <div>
@@ -472,7 +473,6 @@ export default function ClassesPage() {
                   type="text" 
                   name="class_code" 
                   defaultValue={selectedClass?.class_code || ""} 
-                  required 
                 />
               </div>
               <div>
@@ -482,7 +482,6 @@ export default function ClassesPage() {
                   name="grade_level" 
                   defaultValue={selectedClass?.grade_level || ""} 
                   min="1" 
-                  required 
                 />
               </div>
               <div>
@@ -491,7 +490,6 @@ export default function ClassesPage() {
                   type="text" 
                   name="section" 
                   defaultValue={selectedClass?.section || ""} 
-                  required 
                 />
               </div>
               <div>
@@ -501,7 +499,6 @@ export default function ClassesPage() {
                   name="capacity" 
                   defaultValue={selectedClass?.capacity || ""} 
                   min="1" 
-                  required 
                 />
               </div>
               <div>
@@ -510,7 +507,6 @@ export default function ClassesPage() {
                   type="text" 
                   name="room_number" 
                   defaultValue={selectedClass?.room_number || ""} 
-                  required 
                 />
               </div>
               <div>
@@ -519,7 +515,6 @@ export default function ClassesPage() {
                   type="text" 
                   name="academic_year" 
                   defaultValue={selectedClass?.academic_year || ""} 
-                  required 
                 />
               </div>
             </div>

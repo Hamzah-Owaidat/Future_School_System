@@ -6,6 +6,7 @@ import { SidebarProvider } from "@/context/SidebarContext";
 import { ThemeProvider } from "@/context/ThemeContext";
 import { ToastProvider } from "@/components/ui/toast/ToastProvider";
 import { AuthProvider } from "@/context/AuthContext";
+import QueryProvider from "@/components/providers/QueryProvider";
 
 const outfit = Outfit({
   subsets: ["latin"],
@@ -32,11 +33,13 @@ export default function RootLayout({
     <html lang="en" className="overflow-x-hidden">
       <body className={`${outfit.className} overflow-x-hidden`}>
         <ThemeProvider>
-          <AuthProvider>
-            <SidebarProvider>
-              <ToastProvider>{children}</ToastProvider>
-            </SidebarProvider>
-          </AuthProvider>
+          <QueryProvider>
+            <AuthProvider>
+              <SidebarProvider>
+                <ToastProvider>{children}</ToastProvider>
+              </SidebarProvider>
+            </AuthProvider>
+          </QueryProvider>
         </ThemeProvider>
       </body>
     </html>

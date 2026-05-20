@@ -11,6 +11,8 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api/axios";
 import { useAuth, buildSessionFromLoginPayload } from "@/context/AuthContext";
 import { useToast } from "@/components/ui/toast/ToastProvider";
+import { useQueryClient } from "@tanstack/react-query";
+import { queryKeys } from "@/lib/query/queryKeys";
 import type { ApiError } from "@/lib/api/axios";
 
 export default function SignInForm() {
@@ -23,6 +25,7 @@ export default function SignInForm() {
   const router = useRouter();
   const { showToast } = useToast();
   const { setSession } = useAuth();
+  const queryClient = useQueryClient();
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -52,7 +55,7 @@ export default function SignInForm() {
         password: formData.password,
       });
 
-      const payload: Record<string, unknown> = response.data as Record<string, unknown>;
+      const payload = response.data as unknown as Record<string, unknown>;
       const data = (payload?.data ?? payload) as Record<string, unknown>;
 
       if (typeof window !== "undefined" && data?.token) {
@@ -72,6 +75,7 @@ export default function SignInForm() {
       }
 
       setSession(session);
+      queryClient.setQueryData(queryKeys.auth.me, session);
 
       showToast({
         type: "success",

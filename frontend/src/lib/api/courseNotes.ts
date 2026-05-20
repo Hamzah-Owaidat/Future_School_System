@@ -73,7 +73,7 @@ export const courseNotesApi = {
   getMy: async (academicYear?: string): Promise<CourseNote[]> => {
     const params = academicYear ? { academic_year: academicYear } : {};
     const response = await api.get<CourseNote[]>("/course-notes/me", { params });
-    const payload: Record<string, unknown> = response.data as Record<string, unknown>;
+    const payload = response.data as unknown as Record<string, unknown>;
 
     if (Array.isArray(payload?.data)) {
       return payload.data as CourseNote[];

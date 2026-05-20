@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ReusableTable, Column, ActionHandlers } from "@/components/tables/ReusableTable";
 import { Modal } from "@/components/ui/modal";
 import { useModal } from "@/hooks/useModal";
@@ -13,15 +14,24 @@ import { permissionsApi, Permission, CreatePermissionDTO, UpdatePermissionDTO } 
 import { useToast } from "@/components/ui/toast/ToastProvider";
 import { useResourceAccess } from "@/hooks/usePermissions";
 import PermissionGate from "@/components/auth/PermissionGate";
+import { usePermissionsList, useInvalidateCache } from "@/lib/query/hooks";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { STALE } from "@/lib/query/cacheTimes";
 
 export default function PermissionsPage() {
-  const [permissions, setPermissions] = useState<Permission[]>([]);
+  const queryClient = useQueryClient();
+  const invalidate = useInvalidateCache();
+  const {
+    data: permissions = [],
+    isLoading,
+    error: loadError,
+  } = usePermissionsList();
   const [selectedPermission, setSelectedPermission] = useState<Permission | null>(null);
   const [viewPermission, setViewPermission] = useState<Permission | null>(null);
   const [isEditMode, setIsEditMode] = useState(false);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const listKey = queryKeys.permissions.list();
 
   const { showToast } = useToast();
   const { canRead, canManage } = useResourceAccess("permission");
@@ -47,29 +57,6 @@ export default function PermissionsPage() {
     { value: "view", label: "View" },
   ];
 
-  const refetchPermissions = async () => {
-    const data = await permissionsApi.getAll();
-    // Filter out deleted permissions (those with deleted_at) - backend should handle this
-    setPermissions(data);
-  };
-
-  useEffect(() => {
-    const fetchPermissions = async () => {
-      try {
-        setIsLoading(true);
-        setError(null);
-        await refetchPermissions();
-      } catch (err: any) {
-        console.error("Failed to fetch permissions:", err);
-        setError(err?.message || "Failed to load permissions");
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchPermissions();
-  }, []);
-
   const handleAddPermission = () => {
     setSelectedPermission(null);
     setIsEditMode(false);
@@ -79,7 +66,11 @@ export default function PermissionsPage() {
   const handleEditPermission = async (permission: Permission) => {
     try {
       setIsEditMode(true);
-      const details = await permissionsApi.getById(permission.id);
+      const details = await queryClient.fetchQuery({
+        queryKey: queryKeys.permissions.detail(permission.id),
+        queryFn: () => permissionsApi.getById(permission.id),
+        staleTime: STALE.DETAIL,
+      });
       setSelectedPermission(details);
       addEditModal.openModal();
     } catch (err: any) {
@@ -93,7 +84,11 @@ export default function PermissionsPage() {
 
   const handleViewPermission = async (permission: Permission) => {
     try {
-      const details = await permissionsApi.getById(permission.id);
+      const details = await queryClient.fetchQuery({
+        queryKey: queryKeys.permissions.detail(permission.id),
+        queryFn: () => permissionsApi.getById(permission.id),
+        staleTime: STALE.DETAIL,
+      });
       setViewPermission(details);
       viewModal.openModal();
     } catch (err: any) {
@@ -109,9 +104,7 @@ export default function PermissionsPage() {
     if (confirm(`Are you sure you want to delete ${permission.name}?`)) {
       permissionsApi
         .delete(permission.id)
-        .then(() => {
-          setPermissions((prev) => prev.filter((p) => p.id !== permission.id));
-        })
+        .then(() => invalidate.permissions())
         .catch((err: any) => {
           console.error("Failed to delete permission:", err);
           showToast({
@@ -151,7 +144,7 @@ export default function PermissionsPage() {
           await permissionsApi.create(payload);
         }
 
-        await refetchPermissions();
+        await invalidate.permissions();
         addEditModal.closeModal();
         form.reset();
       } catch (err: any) {
@@ -350,7 +343,6 @@ export default function PermissionsPage() {
                   name="name"
                   defaultValue={selectedPermission?.name || ""}
                   placeholder="e.g. create_employee"
-                  required
                 />
               </div>
               <div>
@@ -360,7 +352,6 @@ export default function PermissionsPage() {
                   options={resourceOptions}
                   defaultValue={selectedPermission?.resource || ""}
                   placeholder="Select resource"
-                  required
                 />
               </div>
               <div>
@@ -370,7 +361,6 @@ export default function PermissionsPage() {
                   options={actionOptions}
                   defaultValue={selectedPermission?.action || ""}
                   placeholder="Select action"
-                  required
                 />
               </div>
               <div className="sm:col-span-2">

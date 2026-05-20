@@ -3,9 +3,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { courseNotesApi, type CourseNote, type UpsertCourseNoteDTO } from "@/lib/api/courseNotes";
-import { studentsApi, type Student } from "@/lib/api/students";
-import { classesApi, type Class } from "@/lib/api/classes";
-import { coursesApi, type Course } from "@/lib/api/courses";
+import {
+  useStudentDetail,
+  useStudentCourseNotes,
+  useClassesList,
+  useCoursesList,
+  useInvalidateCache,
+} from "@/lib/query/hooks";
 import Button from "@/components/ui/button/Button";
 import { Modal } from "@/components/ui/modal";
 import SelectInput from "@/components/form/SelectInput";
@@ -14,6 +18,7 @@ import Label from "@/components/form/Label";
 import { useToast } from "@/components/ui/toast/ToastProvider";
 import { useCourseNoteAccess } from "@/hooks/usePermissions";
 import PermissionGate from "@/components/auth/PermissionGate";
+import { useAuth } from "@/context/AuthContext";
 
 const formatSemester = (semester: number) => `Semester ${semester}`;
 
@@ -23,11 +28,13 @@ export default function StudentGradesPage() {
   const studentIdParam = params?.id as string | undefined;
   const studentId = studentIdParam ? parseInt(studentIdParam, 10) : NaN;
 
-  const [student, setStudent] = useState<Student | null>(null);
-  const [notes, setNotes] = useState<CourseNote[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [classes, setClasses] = useState<Class[]>([]);
-  const [courses, setCourses] = useState<Course[]>([]);
+  const invalidate = useInvalidateCache();
+  const validId = !Number.isNaN(studentId) && studentId > 0 ? studentId : null;
+  const { data: student, isLoading: studentLoading } = useStudentDetail(validId);
+  const { data: notes = [], isLoading: notesLoading } = useStudentCourseNotes(validId);
+  const { data: allClasses = [] } = useClassesList({ show_all: false });
+  const { data: allCourses = [] } = useCoursesList({ show_all: false });
+  const isLoading = studentLoading || notesLoading;
 
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [formAcademicYear, setFormAcademicYear] = useState<string>("");
@@ -43,45 +50,24 @@ export default function StudentGradesPage() {
   const [isSaving, setIsSaving] = useState(false);
 
   const { showToast } = useToast();
+  const { user, session } = useAuth();
+  const teacherId = session?.employee?.id ?? user?.id;
   const { canWrite, canView } = useCourseNoteAccess();
 
+  const classes = useMemo(() => {
+    if (student?.class_id) {
+      return allClasses.filter((c) => c.id === student.class_id);
+    }
+    return allClasses;
+  }, [allClasses, student?.class_id]);
+
+  const courses = allCourses;
+
   useEffect(() => {
-    if (!studentId || Number.isNaN(studentId)) return;
-
-    const load = async () => {
-      try {
-        setIsLoading(true);
-        const [stu, courseNotes, allClasses, allCourses] = await Promise.all([
-          studentsApi.getById(studentId),
-          courseNotesApi.getByStudent(studentId),
-          classesApi.getAll({ show_all: false }),
-          coursesApi.getAll({ show_all: false }),
-        ]);
-        setStudent(stu);
-        setNotes(courseNotes);
-
-        // Restrict classes/courses to those relevant to this student (by class_id) if available
-        const studentClassId = stu.class_id;
-        if (studentClassId) {
-          setClasses(allClasses.filter((c) => c.id === studentClassId));
-        } else {
-          setClasses(allClasses);
-        }
-        setCourses(allCourses);
-
-        // Pre-fill add form defaults
-        if (stu.class_id) {
-          setFormClassId(String(stu.class_id));
-        }
-      } catch (error) {
-        console.error("Failed to load student grades", error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    void load();
-  }, [studentId]);
+    if (student?.class_id) {
+      setFormClassId(String(student.class_id));
+    }
+  }, [student?.class_id]);
 
   // Group notes by course and academic year
   const grouped = notes.reduce<Record<string, CourseNote[]>>((acc, note) => {
@@ -129,7 +115,7 @@ export default function StudentGradesPage() {
 
   const handleSaveNote = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!student || !user) return;
+    if (!student || !teacherId) return;
 
     try {
       if (!formAcademicYear.trim() || !formClassId || !formCourseId || !formSemester) {
@@ -163,7 +149,7 @@ export default function StudentGradesPage() {
         student_id: student.id,
         class_id: classId,
         course_id: courseId,
-        teacher_id: user.id,
+        teacher_id: teacherId,
         academic_year: formAcademicYear.trim(),
         semester,
         partial1_score: p1Score,
@@ -177,15 +163,13 @@ export default function StudentGradesPage() {
 
       setIsSaving(true);
       await courseNotesApi.upsert(payload);
+      await invalidate.courseNotes();
 
       showToast({
         type: "success",
         message: "Note saved successfully.",
       });
 
-      // Refresh notes
-      const updatedNotes = await courseNotesApi.getByStudent(student.id);
-      setNotes(updatedNotes);
       setIsAddOpen(false);
     } catch (error) {
       console.error("Failed to save note", error);
@@ -326,7 +310,6 @@ export default function StudentGradesPage() {
                     placeholder="e.g. 2024-2025"
                     value={formAcademicYear}
                     onChange={(e) => setFormAcademicYear(e.target.value)}
-                    required
                   />
                 </div>
                 <div>
@@ -334,7 +317,6 @@ export default function StudentGradesPage() {
                   <SelectInput
                     name="class_id"
                     placeholder="Select a class"
-                    required
                     options={classes.map((cls) => ({
                       value: cls.id,
                       label: `${cls.class_name} (${cls.class_code})`,
@@ -348,7 +330,6 @@ export default function StudentGradesPage() {
                   <SelectInput
                     name="course_id"
                     placeholder="Select a course"
-                    required
                     options={courses.map((course) => ({
                       value: course.id,
                       label: `${course.name} (${course.code})`,
@@ -362,7 +343,6 @@ export default function StudentGradesPage() {
                   <SelectInput
                     name="semester"
                     placeholder="Select semester"
-                    required
                     options={[
                       { value: 1, label: "Semester 1" },
                       { value: 2, label: "Semester 2" },

@@ -1,6 +1,8 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { queryKeys } from "@/lib/query/queryKeys";
 import { ReusableTable, type Column, type ActionHandlers } from "@/components/tables/ReusableTable";
 import Button from "@/components/ui/button/Button";
 import SelectInput from "@/components/form/SelectInput";
@@ -9,13 +11,23 @@ import Label from "@/components/form/Label";
 import { Modal } from "@/components/ui/modal";
 import { useToast } from "@/components/ui/toast/ToastProvider";
 import { ToggleSwitch } from "@/components/ui/toggle/ToggleSwitch";
-import { classCoursesApi, type ClassCourse, type CreateClassCourseDTO, type UpdateClassCourseDTO } from "@/lib/api/classCourses";
-import { classesApi, type Class } from "@/lib/api/classes";
-import { coursesApi, type Course } from "@/lib/api/courses";
-import { employeeApi, type Employee } from "@/lib/api/employees";
+import {
+  classCoursesApi,
+  type ClassCourse,
+  type CreateClassCourseDTO,
+  type GetClassCoursesParams,
+  type UpdateClassCourseDTO,
+} from "@/lib/api/classCourses";
 import { useAuth } from "@/context/AuthContext";
 import { useResourceAccess } from "@/hooks/usePermissions";
 import PermissionGate from "@/components/auth/PermissionGate";
+import {
+  useClassesList,
+  useCoursesList,
+  useClassCoursesList,
+  useTeacherEmployees,
+  useInvalidateCache,
+} from "@/lib/query/hooks";
 
 type Filters = {
   academic_year: string;
@@ -50,12 +62,12 @@ const initialFormState: AssignmentFormState = {
 };
 
 export default function ClassCoursesPage() {
-  const [assignments, setAssignments] = useState<ClassCourse[]>([]);
-  const [classes, setClasses] = useState<Class[]>([]);
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [teachers, setTeachers] = useState<Employee[]>([]);
+  const queryClient = useQueryClient();
+  const invalidate = useInvalidateCache();
+  const { data: classes = [] } = useClassesList({ show_all: false });
+  const { data: courses = [] } = useCoursesList({ show_all: false });
+  const { data: teachers = [] } = useTeacherEmployees();
   const [filters, setFilters] = useState<Filters>(initialFilters);
-  const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
@@ -77,67 +89,25 @@ export default function ClassCoursesPage() {
     return filters.teacher_id ? parseInt(filters.teacher_id, 10) : undefined;
   }, [filters.teacher_id, isScopedReader, employeeId]);
 
-  const loadReferenceData = async () => {
-    try {
-      const [classesData, coursesData, employeesData] = await Promise.all([
-        classesApi.getAll({ show_all: false }),
-        coursesApi.getAll({ show_all: false }),
-        employeeApi.getAll({ show_all: false }),
-      ]);
-
-      setClasses(classesData);
-      setCourses(coursesData);
-
-      // Only employees with teacher role for assignments
-      const teacherEmployees = employeesData.filter((emp) =>
-        emp.role_name?.toLowerCase() === "teacher"
-      );
-      setTeachers(teacherEmployees);
-    } catch (error) {
-      console.error("Failed to load reference data", error);
-      showToast({
-        type: "error",
-        message: "Failed to load classes, courses, or teachers.",
-      });
+  const assignmentParams = useMemo((): GetClassCoursesParams => {
+    const params: GetClassCoursesParams = { show_all: false };
+    if (filters.academic_year) params.academic_year = filters.academic_year;
+    if (filters.class_id) params.class_id = parseInt(filters.class_id, 10);
+    if (filters.course_id) params.course_id = parseInt(filters.course_id, 10);
+    if (effectiveTeacherId) params.teacher_id = effectiveTeacherId;
+    if (filters.is_active !== "all") {
+      params.is_active = filters.is_active === "true";
     }
-  };
+    return params;
+  }, [
+    filters.academic_year,
+    filters.class_id,
+    filters.course_id,
+    filters.is_active,
+    effectiveTeacherId,
+  ]);
 
-  const loadAssignments = async () => {
-    try {
-      setIsLoading(true);
-
-      const params: any = {
-        show_all: false, // Exclude deleted records
-      };
-      if (filters.academic_year) params.academic_year = filters.academic_year;
-      if (filters.class_id) params.class_id = parseInt(filters.class_id, 10);
-      if (filters.course_id) params.course_id = parseInt(filters.course_id, 10);
-      if (effectiveTeacherId) params.teacher_id = effectiveTeacherId;
-      if (filters.is_active !== "all") {
-        params.is_active = filters.is_active === "true";
-      }
-
-      const data = await classCoursesApi.getAll(params);
-      setAssignments(data);
-    } catch (error) {
-      console.error("Failed to load class-course assignments", error);
-      showToast({
-        type: "error",
-        message: "Failed to load assignments.",
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadReferenceData();
-  }, []);
-
-  // Load assignments when filters change
-  useEffect(() => {
-    void loadAssignments();
-  }, [filters.academic_year, filters.class_id, filters.course_id, filters.is_active, effectiveTeacherId]);
+  const { data: assignments = [], isLoading } = useClassCoursesList(assignmentParams);
 
   const handleFilterChange = (field: keyof Filters, value: string) => {
     setFilters((prev) => ({
@@ -259,55 +229,27 @@ export default function ClassCoursesPage() {
           ...basePayload,
           is_active: formState.is_active ? 1 : 0,
         };
-        const updated = await classCoursesApi.update(selectedAssignment.id, payload);
-        setAssignments((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+        await classCoursesApi.update(selectedAssignment.id, payload);
+        await invalidate.classCourses();
         showToast({
           type: "success",
           message: "Assignment updated successfully.",
         });
+        closeAllModals();
       } else {
         const created = await classCoursesApi.create(basePayload);
-        showToast({
-          type: "success",
-          message: "Assignment created successfully.",
-        });
-        
-        // Update filters to match the newly created assignment so it shows up
-        const updatedFilters = {
+        setFilters({
           ...filters,
           academic_year: created.academic_year || filters.academic_year,
           class_id: String(created.class_id),
           course_id: String(created.course_id),
           teacher_id: String(created.teacher_id),
-        };
-        setFilters(updatedFilters);
-        
-        // Refetch with the new assignment's parameters to ensure it shows up
-        // Use the updated filter values directly instead of relying on state
-        try {
-          setIsLoading(true);
-          const params: any = {};
-          if (created.academic_year) params.academic_year = created.academic_year;
-          if (created.class_id) params.class_id = created.class_id;
-          if (created.course_id) params.course_id = created.course_id;
-          if (created.teacher_id) params.teacher_id = created.teacher_id;
-          
-          const data = await classCoursesApi.getAll(params);
-          setAssignments(data);
-        } catch (error) {
-          console.error("Failed to reload assignments after create", error);
-          // Fallback: try loading with current filters
-          await loadAssignments();
-        } finally {
-          setIsLoading(false);
-        }
-      }
-
-      if (selectedAssignment) {
-        closeAllModals();
-        // For updates, refetch with current filters
-        await loadAssignments();
-      } else {
+        });
+        await invalidate.classCourses();
+        showToast({
+          type: "success",
+          message: "Assignment created successfully.",
+        });
         closeAllModals();
       }
     } catch (error) {
@@ -330,7 +272,7 @@ export default function ClassCoursesPage() {
         type: "success",
         message: "Assignment deleted successfully.",
       });
-      void loadAssignments();
+      await invalidate.classCourses();
     } catch (error) {
       console.error("Failed to delete assignment", error);
       showToast({
@@ -341,24 +283,24 @@ export default function ClassCoursesPage() {
   };
 
   const handleToggleActive = async (assignmentId: number, isActive: boolean) => {
-    // Optimistic update: flip in UI immediately
-    setAssignments((prev) =>
-      prev.map((a) =>
+    const listKey = queryKeys.classCourses.list(assignmentParams);
+    queryClient.setQueryData<ClassCourse[]>(listKey, (prev) =>
+      (prev ?? []).map((a) =>
         a.id === assignmentId ? { ...a, is_active: isActive ? 1 : 0 } : a
       )
     );
 
     try {
       await classCoursesApi.updateStatus(assignmentId, isActive);
+      await invalidate.classCourses();
       showToast({
         type: "success",
         message: `Assignment ${isActive ? "activated" : "deactivated"} successfully.`,
       });
     } catch (error) {
       console.error("Failed to update assignment status", error);
-      // Revert optimistic change on error
-      setAssignments((prev) =>
-        prev.map((a) =>
+      queryClient.setQueryData<ClassCourse[]>(listKey, (prev) =>
+        (prev ?? []).map((a) =>
           a.id === assignmentId ? { ...a, is_active: isActive ? 0 : 1 } : a
         )
       );

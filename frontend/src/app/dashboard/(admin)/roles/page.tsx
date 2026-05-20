@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ReusableTable, Column, ActionHandlers } from "@/components/tables/ReusableTable";
 import { ToggleSwitch } from "@/components/ui/toggle/ToggleSwitch";
 import { Modal } from "@/components/ui/modal";
@@ -14,6 +15,13 @@ import { permissionsApi, GroupedPermissions } from "@/lib/api/permissions";
 import { useToast } from "@/components/ui/toast/ToastProvider";
 import { useResourceAccess } from "@/hooks/usePermissions";
 import PermissionGate from "@/components/auth/PermissionGate";
+import {
+  useRolesList,
+  useGroupedPermissions,
+  useInvalidateCache,
+} from "@/lib/query/hooks";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { STALE } from "@/lib/query/cacheTimes";
 
 interface RoleWithCounts extends Role {
   employee_count?: number;
@@ -21,58 +29,45 @@ interface RoleWithCounts extends Role {
 }
 
 export default function RolesPage() {
-  const [roles, setRoles] = useState<RoleWithCounts[]>([]);
+  const queryClient = useQueryClient();
+  const invalidate = useInvalidateCache();
+  const {
+    data: roles = [],
+    isLoading,
+    error: loadError,
+  } = useRolesList(false, false);
+  const { data: groupedPermissions = {} } = useGroupedPermissions();
   const [selectedRole, setSelectedRole] = useState<RoleWithCounts | null>(null);
   const [viewRole, setViewRole] = useState<Role | null>(null);
   const [isEditMode, setIsEditMode] = useState(false);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [groupedPermissions, setGroupedPermissions] = useState<GroupedPermissions>({});
   const [selectedPermissionIds, setSelectedPermissionIds] = useState<number[]>([]);
   const [roleActive, setRoleActive] = useState<boolean>(true);
+  const listKey = queryKeys.roles.list(false, false);
 
   const { showToast } = useToast();
   const { canRead, canManage } = useResourceAccess("role");
   const addEditModal = useModal();
   const viewModal = useModal();
 
-  // Fetch roles
-  useEffect(() => {
-    const fetchRoles = async () => {
-      try {
-        setIsLoading(true);
-        setError(null);
-        const data = await rolesApi.getAll(false, false); // activeOnly=false, showAll=false (exclude deleted)
-        setRoles(data);
-      } catch (err: any) {
-        console.error("Failed to fetch roles:", err);
-        setError(err?.message || "Failed to load roles");
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchRoles();
-  }, []);
-
-  // Refetch helper
-  const refetchRoles = async () => {
-    const data = await rolesApi.getAll(false, false); // activeOnly=false, showAll=false (exclude deleted)
-    setRoles(data);
+  const patchRolesCache = (updater: (list: RoleWithCounts[]) => RoleWithCounts[]) => {
+    queryClient.setQueryData<RoleWithCounts[]>(listKey, (old) => updater((old ?? []) as RoleWithCounts[]));
   };
 
-  // Handle toggle active status
   const handleToggleActive = (roleId: number, newStatus: boolean) => {
-    setRoles((prev) =>
+    patchRolesCache((prev) =>
       prev.map((role) =>
         role.id === roleId ? { ...role, is_active: newStatus ? 1 : 0 } : role
       )
     );
 
-    rolesApi.update(roleId, { is_active: newStatus ? 1 : 0 }).catch((err) => {
+    rolesApi
+      .update(roleId, { is_active: newStatus ? 1 : 0 })
+      .then(() => invalidate.roles())
+      .catch((err) => {
       console.error("Failed to update role status:", err);
-      setRoles((prev) =>
+      patchRolesCache((prev) =>
         prev.map((role) =>
           role.id === roleId ? { ...role, is_active: newStatus ? 0 : 1 } : role
         )
@@ -81,41 +76,28 @@ export default function RolesPage() {
         type: "error",
         message: err?.message || "Failed to update role status",
       });
-    });
+      });
   };
 
-  // Handle add role
   const handleAddRole = () => {
     setSelectedRole(null);
     setIsEditMode(false);
     setSelectedPermissionIds([]);
     setRoleActive(true);
-    // Load grouped permissions once
-    if (Object.keys(groupedPermissions).length === 0) {
-      permissionsApi
-        .getGrouped()
-        .then(setGroupedPermissions)
-        .catch((err) => {
-          console.error("Failed to fetch grouped permissions:", err);
-        });
-    }
     addEditModal.openModal();
   };
 
-  // Handle edit role
   const handleEditRole = async (role: RoleWithCounts) => {
     try {
       setIsEditMode(true);
-      setSelectedRole(role);
-      // Optionally fetch full role details (with permissions)
-      const details = await rolesApi.getById(role.id);
+      const details = await queryClient.fetchQuery({
+        queryKey: queryKeys.roles.detail(role.id),
+        queryFn: () => rolesApi.getById(role.id),
+        staleTime: STALE.DETAIL,
+      });
       setSelectedRole(details);
       setRoleActive((details.is_active ?? 1) === 1);
       setSelectedPermissionIds((details.permissions ?? []).map((p) => p.id));
-      if (Object.keys(groupedPermissions).length === 0) {
-        const grouped = await permissionsApi.getGrouped();
-        setGroupedPermissions(grouped);
-      }
       addEditModal.openModal();
     } catch (err: any) {
       console.error("Failed to load role details:", err);
@@ -129,7 +111,11 @@ export default function RolesPage() {
   // Handle view role
   const handleViewRole = async (role: RoleWithCounts) => {
     try {
-      const details = await rolesApi.getById(role.id);
+      const details = await queryClient.fetchQuery({
+        queryKey: queryKeys.roles.detail(role.id),
+        queryFn: () => rolesApi.getById(role.id),
+        staleTime: STALE.DETAIL,
+      });
       setViewRole(details);
       viewModal.openModal();
     } catch (err: any) {
@@ -146,9 +132,7 @@ export default function RolesPage() {
     if (confirm(`Are you sure you want to delete ${role.name}?`)) {
       rolesApi
         .delete(role.id)
-        .then(() => {
-          setRoles((prev) => prev.filter((r) => r.id !== role.id));
-        })
+        .then(() => invalidate.roles())
         .catch((err) => {
           console.error("Failed to delete role:", err);
           showToast({
@@ -183,7 +167,7 @@ export default function RolesPage() {
           await rolesApi.create(payload);
         }
 
-        await refetchRoles();
+        await invalidate.roles();
         addEditModal.closeModal();
         form.reset();
       } catch (err: any) {
@@ -377,7 +361,6 @@ export default function RolesPage() {
                   name="name"
                   defaultValue={selectedRole?.name || ""}
                   placeholder="Enter role name"
-                  required
                 />
               </div>
               <div>

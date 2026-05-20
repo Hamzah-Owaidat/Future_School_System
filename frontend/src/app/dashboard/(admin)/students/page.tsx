@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ReusableTable, Column, ActionHandlers } from "@/components/tables/ReusableTable";
 import { ToggleSwitch } from "@/components/ui/toggle/ToggleSwitch";
 import { Modal } from "@/components/ui/modal";
@@ -10,8 +11,15 @@ import Input from "@/components/form/input/InputField";
 import Label from "@/components/form/Label";
 import SelectInput from "@/components/form/SelectInput";
 import { studentsApi, Student, CreateStudentDTO, UpdateStudentDTO } from "@/lib/api/students";
-import { classesApi, Class } from "@/lib/api/classes";
 import { useToast } from "@/components/ui/toast/ToastProvider";
+import {
+  useStudentsList,
+  useClassesList,
+  useNextStudentCode,
+  useInvalidateCache,
+} from "@/lib/query/hooks";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { STALE } from "@/lib/query/cacheTimes";
 import { useResourceAccess, useCourseNoteAccess } from "@/hooks/usePermissions";
 import PermissionGate from "@/components/auth/PermissionGate";
 
@@ -26,56 +34,41 @@ const formatDate = (dateString: string): string => {
   });
 };
 
+const STUDENTS_LIST_PARAMS = { show_all: false } as const;
+
 export default function StudentsPage() {
-  const [students, setStudents] = useState<Student[]>([]);
-  const [classes, setClasses] = useState<Class[]>([]);
+  const queryClient = useQueryClient();
+  const invalidate = useInvalidateCache();
+  const {
+    data: students = [],
+    isLoading,
+    error: loadError,
+  } = useStudentsList(STUDENTS_LIST_PARAMS);
+  const { data: classes = [] } = useClassesList({ show_all: false });
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [viewStudent, setViewStudent] = useState<Student | null>(null);
   const [isEditMode, setIsEditMode] = useState(false);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [nextStudentCode, setNextStudentCode] = useState<string>("");
-  const [isLoadingNextCode, setIsLoadingNextCode] = useState(false);
   const { showToast } = useToast();
   const { canRead, canManage } = useResourceAccess("student");
   const { canView: canViewGrades } = useCourseNoteAccess();
   const addModal = useModal();
   const editModal = useModal();
   const viewModal = useModal();
+  const { data: nextStudentCode = "", isLoading: isLoadingNextCode } =
+    useNextStudentCode(addModal.isOpen);
 
-  // Fetch students and classes from API
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        setIsLoading(true);
-        setError(null);
-        const [studentsData, classesData] = await Promise.all([
-          studentsApi.getAll({ show_all: false }),
-          classesApi.getAll({ show_all: false }),
-        ]);
-        setStudents(studentsData);
-        setClasses(classesData);
-      } catch (err: any) {
-        console.error("Failed to fetch data:", err);
-        setError(err?.message || "Failed to load data");
-      } finally {
-        setIsLoading(false);
-      }
-    };
+  const listKey = queryKeys.students.list(STUDENTS_LIST_PARAMS);
+  const displayError =
+    error || (loadError instanceof Error ? loadError.message : loadError ? String(loadError) : null);
 
-    fetchData();
-  }, []);
-
-  const refetchStudents = async () => {
-    const data = await studentsApi.getAll({ show_all: false });
-    setStudents(data);
+  const patchStudentsCache = (updater: (list: Student[]) => Student[]) => {
+    queryClient.setQueryData<Student[]>(listKey, (old) => updater(old ?? []));
   };
 
-  // Handle toggle active status
   const handleToggleActive = (studentId: number, newStatus: boolean) => {
-    // Optimistic UI update
-    setStudents((prev) =>
+    patchStudentsCache((prev) =>
       prev.map((student) =>
         student.id === studentId
           ? { ...student, is_active: newStatus ? 1 : 0 }
@@ -83,12 +76,12 @@ export default function StudentsPage() {
       )
     );
 
-    // Persist change to API
     studentsApi
       .updateStatus(studentId, newStatus)
+      .then(() => invalidate.students())
       .catch((err) => {
         console.error("Failed to update student status:", err);
-        setStudents((prev) =>
+        patchStudentsCache((prev) =>
           prev.map((student) =>
             student.id === studentId
               ? { ...student, is_active: newStatus ? 0 : 1 }
@@ -102,33 +95,20 @@ export default function StudentsPage() {
       });
   };
 
-  // Handle add student
-  const handleAddStudent = async () => {
+  const handleAddStudent = () => {
     setSelectedStudent(null);
     setIsEditMode(false);
-    setIsLoadingNextCode(true);
-    setNextStudentCode("");
     addModal.openModal();
-    try {
-      const code = await studentsApi.getNextCode();
-      setNextStudentCode(code);
-    } catch (err: unknown) {
-      console.error("Failed to load next student code:", err);
-      showToast({
-        type: "error",
-        message: "Could not load the next student code. It will still be assigned on save.",
-      });
-    } finally {
-      setIsLoadingNextCode(false);
-    }
   };
 
-  // Handle edit student
   const handleEditStudent = async (student: Student) => {
     try {
       setIsEditMode(true);
-      // Fetch full student details to ensure we have all fields
-      const details = await studentsApi.getById(student.id);
+      const details = await queryClient.fetchQuery({
+        queryKey: queryKeys.students.detail(student.id),
+        queryFn: () => studentsApi.getById(student.id),
+        staleTime: STALE.DETAIL,
+      });
       setSelectedStudent(details);
       editModal.openModal();
     } catch (err: any) {
@@ -143,8 +123,11 @@ export default function StudentsPage() {
   // Handle view student
   const handleViewStudent = async (student: Student) => {
     try {
-      // Fetch full student details
-      const details = await studentsApi.getById(student.id);
+      const details = await queryClient.fetchQuery({
+        queryKey: queryKeys.students.detail(student.id),
+        queryFn: () => studentsApi.getById(student.id),
+        staleTime: STALE.DETAIL,
+      });
       setViewStudent(details);
       viewModal.openModal();
     } catch (err: any) {
@@ -194,27 +177,15 @@ export default function StudentsPage() {
         if (isEditMode && selectedStudent) {
           const { password: _pw, ...updateFields } = basePayload;
           const updatePayload: UpdateStudentDTO = updateFields;
-          const updated = await studentsApi.update(selectedStudent.id, updatePayload);
-
-          // Refetch students to ensure we have complete data
-          try {
-            const refreshedStudents = await studentsApi.getAll({ show_all: false });
-            setStudents(refreshedStudents);
-          } catch (refreshError) {
-            console.warn("Failed to refresh students list:", refreshError);
-            // Fallback: Update optimistically
-            setStudents((prev) =>
-              prev.map((stu) => (stu.id === updated.id ? updated : stu))
-            );
-          }
+          await studentsApi.update(selectedStudent.id, updatePayload);
+          await invalidate.students();
 
           editModal.closeModal();
           setSelectedStudent(null);
           setIsEditMode(false);
         } else {
-          // Create new student
           await studentsApi.create(basePayload);
-          await refetchStudents();
+          await invalidate.students();
           addModal.closeModal();
           form.reset();
         }
@@ -375,7 +346,7 @@ export default function StudentsPage() {
       const deleteStudent = async () => {
         try {
           await studentsApi.delete(student.id);
-          setStudents((prev) => prev.filter((stu) => stu.id !== student.id));
+          await invalidate.students();
         } catch (err: any) {
           console.error("Failed to delete student:", err);
           showToast({
@@ -446,9 +417,9 @@ export default function StudentsPage() {
       </div>
 
       {/* Students Table */}
-      {error && (
+      {displayError && (
         <p className="text-sm" style={{ color: "var(--theme-text-error, #f04438)" }}>
-          {error}
+          {displayError}
         </p>
       )}
       <ReusableTable
@@ -485,7 +456,6 @@ export default function StudentsPage() {
                       : nextStudentCode || "Assigned on save"
                   }
                   disabled
-                  readOnly
                 />
                 <p className="mt-1 text-xs" style={{ color: "var(--theme-text-secondary)" }}>
                   Auto-generated (STU000, STU001, …)
@@ -504,11 +474,11 @@ export default function StudentsPage() {
               </div>
               <div>
                 <Label>First Name</Label>
-                <Input type="text" name="first_name" placeholder="Enter first name" required />
+                <Input type="text" name="first_name" placeholder="Enter first name" />
               </div>
               <div>
                 <Label>Last Name</Label>
-                <Input type="text" name="last_name" placeholder="Enter last name" required />
+                <Input type="text" name="last_name" placeholder="Enter last name" />
               </div>
               <div>
                 <Label>Email</Label>
@@ -520,7 +490,6 @@ export default function StudentsPage() {
                   type="password"
                   name="password"
                   placeholder="Only if student will sign in"
-                  autoComplete="new-password"
                 />
                 <p className="mt-1 text-xs" style={{ color: "var(--theme-text-secondary)" }}>
                   Optional. Leave blank for contact email only; fill with email to enable My Grades login.
@@ -532,7 +501,7 @@ export default function StudentsPage() {
               </div>
               <div>
                 <Label>Date of Birth</Label>
-                <Input type="date" name="date_of_birth" required />
+                <Input type="date" name="date_of_birth" />
               </div>
               <div>
                 <Label htmlFor="gender">Gender</Label>
@@ -565,7 +534,7 @@ export default function StudentsPage() {
               </div>
               <div>
                 <Label>Enrollment Date</Label>
-                <Input type="date" name="enrollment_date" required />
+                <Input type="date" name="enrollment_date" />
               </div>
             </div>
             <div className="flex justify-end gap-3 pt-4">
@@ -603,7 +572,6 @@ export default function StudentsPage() {
                   type="text"
                   value={selectedStudent?.student_code || ""}
                   disabled
-                  readOnly
                 />
               </div>
               <div>
@@ -628,7 +596,6 @@ export default function StudentsPage() {
                   type="text" 
                   name="first_name" 
                   defaultValue={selectedStudent?.first_name || ""} 
-                  required 
                 />
               </div>
               <div>
@@ -637,7 +604,6 @@ export default function StudentsPage() {
                   type="text" 
                   name="last_name" 
                   defaultValue={selectedStudent?.last_name || ""} 
-                  required 
                 />
               </div>
               <div>
@@ -662,7 +628,6 @@ export default function StudentsPage() {
                   type="date" 
                   name="date_of_birth" 
                   defaultValue={selectedStudent?.date_of_birth ? new Date(selectedStudent.date_of_birth).toISOString().split('T')[0] : ""} 
-                  required 
                 />
               </div>
               <div>
@@ -716,7 +681,6 @@ export default function StudentsPage() {
                   type="date" 
                   name="enrollment_date" 
                   defaultValue={selectedStudent?.enrollment_date ? new Date(selectedStudent.enrollment_date).toISOString().split('T')[0] : ""} 
-                  required 
                 />
               </div>
             </div>

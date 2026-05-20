@@ -1,16 +1,20 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { coursesApi, type Course, type CreateCourseDTO, type UpdateCourseDTO } from "@/lib/api/courses";
 import { ReusableTable, type Column, type ActionHandlers } from "@/components/tables/ReusableTable";
 import Button from "@/components/ui/button/Button";
 import Input from "@/components/form/input/InputField";
+import Label from "@/components/form/Label";
 import TextArea from "@/components/form/input/TextArea";
 import { Modal } from "@/components/ui/modal";
 import { useToast } from "@/components/ui/toast/ToastProvider";
 import { ToggleSwitch } from "@/components/ui/toggle/ToggleSwitch";
 import { useResourceAccess } from "@/hooks/usePermissions";
 import PermissionGate from "@/components/auth/PermissionGate";
+import { useCoursesList, useInvalidateCache } from "@/lib/query/hooks";
+
+const COURSES_LIST_PARAMS = { limit: 200, show_all: false } as const;
 
 type CourseFormState = {
   name: string;
@@ -28,8 +32,8 @@ const initialFormState: CourseFormState = {
 
 export default function CoursesPage() {
   const { canRead, canManage } = useResourceAccess("course");
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const invalidate = useInvalidateCache();
+  const { data: courses = [], isLoading } = useCoursesList(COURSES_LIST_PARAMS);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
@@ -37,26 +41,6 @@ export default function CoursesPage() {
   const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
   const [formState, setFormState] = useState<CourseFormState>(initialFormState);
   const { showToast } = useToast();
-
-  const fetchCourses = async () => {
-    try {
-      setIsLoading(true);
-      const data = await coursesApi.getAll({ limit: 200, show_all: false });
-      setCourses(data);
-    } catch (error) {
-      console.error("Failed to fetch courses", error);
-      showToast({
-        type: "error",
-        message: "Failed to load courses.",
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void fetchCourses();
-  }, []);
 
   const openAddModal = () => {
     setFormState(initialFormState);
@@ -105,16 +89,13 @@ export default function CoursesPage() {
         description: formState.description.trim() || null,
       };
 
-      const created = await coursesApi.create(payload);
-      // Optimistic update
-      setCourses((prev) => [...prev, created]);
+      await coursesApi.create(payload);
+      await invalidate.courses();
       showToast({
         type: "success",
         message: "Course created successfully.",
       });
       closeAllModals();
-      // Refetch to ensure sync with backend
-      void fetchCourses();
     } catch (error) {
       console.error("Failed to create course", error);
       showToast({
@@ -138,14 +119,13 @@ export default function CoursesPage() {
         is_active: formState.is_active ? 1 : 0,
       };
 
-      const updated = await coursesApi.update(selectedCourse.id, payload);
-      setCourses((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+      await coursesApi.update(selectedCourse.id, payload);
+      await invalidate.courses();
       showToast({
         type: "success",
         message: "Course updated successfully.",
       });
       closeAllModals();
-      void fetchCourses();
     } catch (error) {
       console.error("Failed to update course", error);
       showToast({
@@ -159,8 +139,8 @@ export default function CoursesPage() {
 
   const handleToggleActive = async (courseId: number, isActive: boolean) => {
     try {
-      const updated = await coursesApi.updateStatus(courseId, isActive);
-      setCourses((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+      await coursesApi.updateStatus(courseId, isActive);
+      await invalidate.courses();
       showToast({
         type: "success",
         message: `Course ${isActive ? "activated" : "deactivated"} successfully.`,
@@ -186,7 +166,7 @@ export default function CoursesPage() {
         type: "success",
         message: "Course deleted successfully.",
       });
-      void fetchCourses();
+      await invalidate.courses();
     } catch (error) {
       console.error("Failed to delete course", error);
       showToast({
@@ -301,30 +281,28 @@ export default function CoursesPage() {
           <form onSubmit={handleCreate} className="space-y-5">
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
               <div className="sm:col-span-2">
+                <Label>Course Name</Label>
                 <Input
-                  label="Course Name"
                   placeholder="e.g. Mathematics"
-                  required
                   value={formState.name}
                   onChange={(e) => handleChange("name", e.target.value)}
                 />
               </div>
               <div className="sm:col-span-2">
+                <Label>Course Code</Label>
                 <Input
-                  label="Course Code"
                   placeholder="e.g. MATH101"
-                  required
                   value={formState.code}
                   onChange={(e) => handleChange("code", e.target.value)}
                 />
               </div>
               <div className="sm:col-span-2">
+                <Label>Description</Label>
                 <TextArea
                   name="description"
-                  label="Description"
                   placeholder="Optional description"
                   defaultValue={formState.description}
-                  onChange={(e) => handleChange("description", e.target.value)}
+                  onChange={(value) => handleChange("description", value)}
                 />
               </div>
             </div>
@@ -364,30 +342,28 @@ export default function CoursesPage() {
           <form onSubmit={handleUpdate} className="space-y-5">
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
               <div className="sm:col-span-2">
+                <Label>Course Name</Label>
                 <Input
-                  label="Course Name"
                   placeholder="e.g. Mathematics"
-                  required
                   value={formState.name}
                   onChange={(e) => handleChange("name", e.target.value)}
                 />
               </div>
               <div className="sm:col-span-2">
+                <Label>Course Code</Label>
                 <Input
-                  label="Course Code"
                   placeholder="e.g. MATH101"
-                  required
                   value={formState.code}
                   onChange={(e) => handleChange("code", e.target.value)}
                 />
               </div>
               <div className="sm:col-span-2">
+                <Label>Description</Label>
                 <TextArea
                   name="description"
-                  label="Description"
                   placeholder="Optional description"
                   defaultValue={formState.description}
-                  onChange={(e) => handleChange("description", e.target.value)}
+                  onChange={(value) => handleChange("description", value)}
                 />
               </div>
               <div className="sm:col-span-2">

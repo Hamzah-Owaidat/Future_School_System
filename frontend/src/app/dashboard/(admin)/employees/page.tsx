@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ReusableTable, Column, ActionHandlers } from "@/components/tables/ReusableTable";
 import { ToggleSwitch } from "@/components/ui/toggle/ToggleSwitch";
 import { Modal } from "@/components/ui/modal";
@@ -14,6 +15,15 @@ import { rolesApi, Role } from "@/lib/api/roles";
 import { useToast } from "@/components/ui/toast/ToastProvider";
 import { useResourceAccess } from "@/hooks/usePermissions";
 import PermissionGate from "@/components/auth/PermissionGate";
+import {
+  useEmployeesList,
+  useRolesList,
+  useInvalidateCache,
+} from "@/lib/query/hooks";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { STALE } from "@/lib/query/cacheTimes";
+
+const EMPLOYEES_LIST_PARAMS = { show_all: false } as const;
 
 // Format date helper
 const formatDate = (dateString: string): string => {
@@ -37,14 +47,20 @@ const formatCurrency = (amount: string): string => {
 };
 
 export default function EmployeesPage() {
-  const [employees, setEmployees] = useState<Employee[]>([]);
-  const [roles, setRoles] = useState<Role[]>([]);
-  const [allRoles, setAllRoles] = useState<Role[]>([]); // Store all roles for edge cases
+  const queryClient = useQueryClient();
+  const invalidate = useInvalidateCache();
+  const {
+    data: employees = [],
+    isLoading,
+    error: loadError,
+  } = useEmployeesList(EMPLOYEES_LIST_PARAMS);
+  const { data: roles = [] } = useRolesList(true, false);
+  const { data: allRoles = [] } = useRolesList(false, false);
   const [selectedEmployee, setSelectedEmployee] = useState<Employee | null>(null);
   const [viewEmployee, setViewEmployee] = useState<Employee | null>(null);
   const [isEditMode, setIsEditMode] = useState(false);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  const listKey = queryKeys.employees.list(EMPLOYEES_LIST_PARAMS);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const { showToast } = useToast();
@@ -53,35 +69,25 @@ export default function EmployeesPage() {
   const editModal = useModal();
   const viewModal = useModal();
 
-  // Fetch employees and roles from API
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        setIsLoading(true);
-        setError(null);
-        const [employeesData, activeRolesData, allRolesData] = await Promise.all([
-          employeeApi.getAll({ show_all: false }),
-          rolesApi.getAll(true), // Only active roles for dropdown
-          rolesApi.getAll(false), // All roles for reference
-        ]);
-        setEmployees(employeesData);
-        setRoles(activeRolesData);
-        setAllRoles(allRolesData);
-      } catch (err: any) {
-        console.error("Failed to fetch data:", err);
-        setError(err?.message || "Failed to load data");
-      } finally {
-        setIsLoading(false);
-      }
-    };
+  const rolesForDropdown = useMemo(() => {
+    if (!selectedEmployee?.role_id) return roles;
+    const currentRole = allRoles.find((r) => r.id === selectedEmployee.role_id);
+    if (
+      currentRole &&
+      currentRole.is_active === 0 &&
+      !roles.some((r) => r.id === currentRole.id)
+    ) {
+      return [...roles, currentRole];
+    }
+    return roles;
+  }, [roles, allRoles, selectedEmployee]);
 
-    fetchData();
-  }, []);
+  const patchEmployeesCache = (updater: (list: Employee[]) => Employee[]) => {
+    queryClient.setQueryData<Employee[]>(listKey, (old) => updater(old ?? []));
+  };
 
-  // Handle toggle active status
   const handleToggleActive = (employeeCode: string, newStatus: boolean, employeeId: number) => {
-    // Optimistic UI update
-    setEmployees((prev) =>
+    patchEmployeesCache((prev) =>
       prev.map((emp) =>
         emp.employee_code === employeeCode
           ? { ...emp, is_active: newStatus ? 1 : 0 }
@@ -89,12 +95,12 @@ export default function EmployeesPage() {
       )
     );
 
-    // Persist change to API
     employeeApi
       .updateStatus(employeeId, newStatus)
+      .then(() => invalidate.employees())
       .catch((err) => {
         console.error("Failed to update employee status:", err);
-        setEmployees((prev) =>
+        patchEmployeesCache((prev) =>
           prev.map((emp) =>
             emp.employee_code === employeeCode
               ? { ...emp, is_active: newStatus ? 0 : 1 }
@@ -133,24 +139,12 @@ export default function EmployeesPage() {
     try {
       setIsEditMode(true);
       // Fetch full employee details by numeric ID to ensure we have all fields
-      const details = await employeeApi.getById(employee.id);
+      const details = await queryClient.fetchQuery({
+        queryKey: queryKeys.employees.detail(employee.id),
+        queryFn: () => employeeApi.getById(employee.id),
+        staleTime: STALE.DETAIL,
+      });
       setSelectedEmployee(details);
-      
-      // If employee's current role is inactive, include it in the roles list for the dropdown
-      if (details.role_id) {
-        const currentRole = allRoles.find(r => r.id === details.role_id);
-        if (currentRole && currentRole.is_active === 0) {
-          // Add inactive role to the roles list if not already present
-          setRoles(prev => {
-            const exists = prev.some(r => r.id === currentRole.id);
-            if (!exists) {
-              return [...prev, currentRole];
-            }
-            return prev;
-          });
-        }
-      }
-      
       editModal.openModal();
     } catch (err: any) {
       console.error("Failed to load employee details:", err);
@@ -165,7 +159,11 @@ export default function EmployeesPage() {
   const handleViewEmployee = async (employee: Employee) => {
     try {
       // Fetch full employee details by numeric ID
-      const details = await employeeApi.getById(employee.id);
+      const details = await queryClient.fetchQuery({
+        queryKey: queryKeys.employees.detail(employee.id),
+        queryFn: () => employeeApi.getById(employee.id),
+        staleTime: STALE.DETAIL,
+      });
       setViewEmployee(details);
       viewModal.openModal();
     } catch (err: any) {
@@ -195,14 +193,14 @@ export default function EmployeesPage() {
     const role_id = (formData.get("role_id") as string | null)?.trim() || "";
     const gender = (formData.get("gender") as string | null)?.trim() || "";
 
-    // Validate required fields - check for empty strings explicitly
-    if (first_name === "") errors.first_name = "First name is required";
-    if (last_name === "") errors.last_name = "Last name is required";
-    if (email === "") errors.email = "Email is required";
-    if (!isEditMode && password === "") errors.password = "Password is required";
-    if (hire_date === "") errors.hire_date = "Hire date is required";
-    if (role_id === "") errors.role_id = "Role is required";
-    if (gender === "") errors.gender = "Gender is required";
+    // Validate fields - check for empty strings explicitly
+    if (first_name === "") errors.first_name = "First name is";
+    if (last_name === "") errors.last_name = "Last name is";
+    if (email === "") errors.email = "Email is";
+    if (!isEditMode && password === "") errors.password = "Password is";
+    if (hire_date === "") errors.hire_date = "Hire date is";
+    if (role_id === "") errors.role_id = "Role is";
+    if (gender === "") errors.gender = "Gender is";
 
     // If there are validation errors, set them and stop immediately
     if (Object.keys(errors).length > 0) {
@@ -245,24 +243,8 @@ export default function EmployeesPage() {
           console.log("Updating employee with id:", selectedEmployee.id);
           console.log("Update payload:", updatePayload);
           
-          const updated = await employeeApi.update(selectedEmployee.id, updatePayload);
-          
-          console.log("Updated employee response:", updated);
-          
-          // Refetch employees to ensure we have complete data
-          try {
-            const refreshedEmployees = await employeeApi.getAll({ show_all: false });
-            setEmployees(refreshedEmployees);
-          } catch (refreshError) {
-            console.warn("Failed to refresh employees list:", refreshError);
-            // Fallback: Update optimistically
-            setEmployees((prev) =>
-              prev.map((emp) =>
-                emp.employee_code === updated.employee_code ? updated : emp
-              )
-            );
-          }
-          
+          await employeeApi.update(selectedEmployee.id, updatePayload);
+          await invalidate.employees();
           editModal.closeModal();
           setSelectedEmployee(null);
           setIsEditMode(false);
@@ -270,30 +252,8 @@ export default function EmployeesPage() {
           setError(null);
         } else {
           // Create new employee
-          const created = await employeeApi.create(payload);
-          
-          console.log("Created employee response:", created);
-          
-          // Enrich with role_name if not provided by backend
-          const enrichedEmployee = {
-            ...created,
-            role_name: created.role_name || roles.find(r => r.id === created.role_id)?.name || "Unknown",
-          };
-          
-          console.log("Enriched employee:", enrichedEmployee);
-          
-          // Refetch employees to ensure we have complete data from server
-          // This ensures the new employee appears in the table with all fields
-          try {
-            const refreshedEmployees = await employeeApi.getAll({ show_all: false });
-            console.log("Refreshed employees:", refreshedEmployees);
-            setEmployees(refreshedEmployees);
-          } catch (refreshError) {
-            console.warn("Failed to refresh employees list:", refreshError);
-            // Fallback: Add the enriched employee optimistically
-            setEmployees((prev) => [enrichedEmployee, ...prev]);
-          }
-          
+          await employeeApi.create(payload);
+          await invalidate.employees();
           addModal.closeModal();
           form.reset();
           setFieldErrors({});
@@ -324,7 +284,7 @@ export default function EmployeesPage() {
         if (Object.keys(errors).length === 0 && errorData?.error) {
           // Try to parse common error patterns
           const errorMsg = errorData.error;
-          // Check for common field error patterns like "email is required", "first_name: required", etc.
+          // Check for common field error patterns like "email is", "first_name:", etc.
           const fieldPatterns = [
             /(\w+)\s+(?:is\s+)?(?:required|invalid|already exists|must be)/i,
             /(\w+):\s*(.+)/,
@@ -511,29 +471,17 @@ export default function EmployeesPage() {
       ) {
         const deleteEmployee = async () => {
           try {
-            // Optimistically update the employee status to inactive (soft delete)
-            setEmployees((prev) =>
+            patchEmployeesCache((prev) =>
               prev.map((emp) =>
-                emp.id === employee.id
-                  ? { ...emp, is_active: 0 }
-                  : emp
+                emp.id === employee.id ? { ...emp, is_active: 0 } : emp
               )
             );
 
             await employeeApi.delete(employee.id);
-            
-            // Optionally refetch to ensure consistency with backend
-            try {
-              const refreshedEmployees = await employeeApi.getAll({ show_all: false });
-              setEmployees(refreshedEmployees);
-            } catch (refreshError) {
-              console.warn("Failed to refresh employees list:", refreshError);
-              // Keep the optimistic update if refresh fails
-            }
+            await invalidate.employees();
           } catch (err: any) {
             console.error("Failed to delete employee:", err);
-            // Revert the optimistic update on error
-            setEmployees((prev) =>
+            patchEmployeesCache((prev) =>
               prev.map((emp) =>
                 emp.id === employee.id
                   ? { ...emp, is_active: employee.is_active }
@@ -762,7 +710,6 @@ export default function EmployeesPage() {
                     { value: "female", label: "Female" },
                   ]}
                   placeholder="Select gender"
-                  required
                   onChange={() => handleFieldChange("gender")}
                   error={!!fieldErrors.gender}
                 />
@@ -776,14 +723,13 @@ export default function EmployeesPage() {
                 </Label>
                 <SelectInput
                   name="role_id"
-                  options={roles
+                  options={rolesForDropdown
                     .filter((role) => role.is_active === 1) // Only show active roles when adding
                     .map((role) => ({
                       value: role.id,
                       label: role.name.charAt(0).toUpperCase() + role.name.slice(1),
                     }))}
                   placeholder="Select role"
-                  required
                   onChange={() => handleFieldChange("role_id")}
                   error={!!fieldErrors.role_id}
                 />
@@ -994,7 +940,6 @@ export default function EmployeesPage() {
                   ]}
                   placeholder="Select gender"
                   defaultValue={selectedEmployee?.gender || ""}
-                  required
                   onChange={() => handleFieldChange("gender")}
                   error={!!fieldErrors.gender}
                 />
@@ -1008,7 +953,7 @@ export default function EmployeesPage() {
                 </Label>
                 <SelectInput
                   name="role_id"
-                  options={roles
+                  options={rolesForDropdown
                     .filter((role) => {
                       // Show active roles OR the current employee's role (even if inactive)
                       return role.is_active === 1 || role.id === selectedEmployee?.role_id;
@@ -1021,7 +966,6 @@ export default function EmployeesPage() {
                     }))}
                   placeholder="Select role"
                   defaultValue={selectedEmployee?.role_id !== undefined ? selectedEmployee.role_id : ""}
-                  required
                   onChange={() => handleFieldChange("role_id")}
                   error={!!fieldErrors.role_id}
                 />

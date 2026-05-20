@@ -7,11 +7,8 @@ import Backdrop from "@/layout/Backdrop";
 import DashboardRouteGuard from "@/components/auth/DashboardRouteGuard";
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api/axios";
-import {
-  useAuth,
-  buildSessionFromMePayload,
-} from "@/context/AuthContext";
+import { useAuth } from "@/context/AuthContext";
+import { useAuthMe } from "@/lib/query/hooks";
 
 export default function AdminLayout({
   children,
@@ -23,49 +20,40 @@ export default function AdminLayout({
   const { setSession, isReady } = useAuth();
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
 
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("token") : null;
+
+  const {
+    data: meSession,
+    isError: authError,
+    isFetched: authFetched,
+  } = useAuthMe(!!token);
+
   useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        const token =
-          typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    if (!token) {
+      router.replace("/auth/signin");
+      setIsCheckingAuth(false);
+      return;
+    }
+    if (!authFetched) return;
 
-        if (!token) {
-          router.replace("/auth/signin");
-          return;
-        }
-
-        try {
-          const response = await api.get("/auth/me");
-          const payload: Record<string, unknown> = response.data as Record<string, unknown>;
-          const data = (payload?.data ?? payload) as Record<string, unknown>;
-
-          const session = buildSessionFromMePayload({
-            account_type: data.account_type as string | undefined,
-            employee: data.employee as never,
-            student: data.student as never,
-            permissions: (data.permissions as string[]) ?? [],
-          });
-
-          if (session) {
-            setSession(session);
-          }
-        } catch {
-          if (typeof window !== "undefined") {
-            localStorage.removeItem("token");
-            localStorage.removeItem("auth_session");
-            localStorage.removeItem("user");
-            localStorage.removeItem("permissions");
-          }
-          router.replace("/auth/signin");
-          return;
-        }
-      } finally {
-        setIsCheckingAuth(false);
+    if (authError) {
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("token");
+        localStorage.removeItem("auth_session");
+        localStorage.removeItem("user");
+        localStorage.removeItem("permissions");
       }
-    };
+      router.replace("/auth/signin");
+      setIsCheckingAuth(false);
+      return;
+    }
 
-    void checkAuth();
-  }, [router, setSession]);
+    if (meSession) {
+      setSession(meSession);
+    }
+    setIsCheckingAuth(false);
+  }, [token, authFetched, authError, meSession, router, setSession]);
 
   if (isCheckingAuth || !isReady) {
     return (
